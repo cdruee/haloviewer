@@ -61,12 +61,35 @@ windlidar-gui /path/to/Data/Proc   # or start with a directory already loaded
 ```
 
 Layout: a settings panel on the left (root directory picker, file-kind
-list, plot-type selector, start/end time range, First/Back/Forward/Last
-browse buttons) and the plot on the right, with the standard matplotlib
-navigation toolbar (zoom/pan/save) underneath it. The root directory
-can be the `Proc` folder itself or any directory below it (e.g. a
-single year, month, or day); the tree is rescanned whenever a new
-directory is picked or typed in and confirmed with Enter.
+list, plot-type selector, height range, start/end time range with quick
+presets, First/Back/Forward/Last browse buttons) and the plot on the
+right, with the standard matplotlib navigation toolbar (zoom/pan/save)
+underneath it. The root directory can be the `Proc` folder itself or
+any directory below it (e.g. a single year, month, or day); the tree is
+rescanned whenever a new directory is picked or typed in and confirmed
+with Enter.
+
+**Height range.** Bottom/Top fields control the shared height axis.
+With **Auto** checked (the default) they're read-only and just display
+the current autoscaled range; uncheck it to type your own bottom/top or
+use the ▲/▼ steppers next to each field (step size scales with the
+current span: 2.5 m up to 5 m up to 10 m ... capped at 250 m for very
+tall views; the span can't be shrunk below 25 m). A manual height range
+is applied instantly, without re-reading any files, and persists across
+navigation and time-range changes until you switch Auto back on.
+
+**Time range presets.** The radio buttons between End time and Apply
+range (Custom, Week before, 2 days before, 24h before, 12h before, 6h
+before) set Start time to End time minus that offset and immediately
+reload -- Start time is editable only when Custom is selected. Changing
+End time while a preset other than Custom is active recomputes Start
+time from it.
+
+The plot's own zoom/pan tools (in the toolbar under it) work as usual;
+holding `x` or `y` while dragging the zoom-rectangle constrains it to
+one axis. Profile mode's two panels share the height axis, and
+timeseries mode's two panels share both the time and height axes, so
+zooming/panning either one keeps the pair in sync.
 
 For `Processed_Wind_Profile` files:
 

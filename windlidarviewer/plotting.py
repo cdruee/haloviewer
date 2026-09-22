@@ -209,9 +209,11 @@ def create_timeseries_figure(
         fig: Optional[Figure] = None) -> Tuple[Figure, tuple]:
     """
     Create a figure with two vertically-stacked panels (speed on top,
-    direction below) sharing a horizontal time axis, each with its own
-    colorbar, a small gap between the panels, and a fixed subplot
-    layout.
+    direction below) sharing a horizontal time axis *and* a vertical
+    height axis (so panning/zooming height in one panel keeps the other
+    in sync, matching the profile plot's shared height axis), each with
+    its own colorbar, a small gap between the panels, and a fixed
+    subplot layout.
 
     :param figsize: figure size in inches. Ignored if ``fig`` is given.
     :param fig: an existing (empty) figure to build the axes on; see \
@@ -226,7 +228,7 @@ def create_timeseries_figure(
     gs = fig.add_gridspec(2, 1, hspace=0.08,
                            left=left, right=right, top=top, bottom=bottom)
     ax_speed = fig.add_subplot(gs[0, 0])
-    ax_dir = fig.add_subplot(gs[1, 0], sharex=ax_speed)
+    ax_dir = fig.add_subplot(gs[1, 0], sharex=ax_speed, sharey=ax_speed)
     ax_speed.tick_params(axis='x', labelbottom=False)
 
     cax_speed = fig.add_axes([right + cbar_gap, ax_speed.get_position().y0,
