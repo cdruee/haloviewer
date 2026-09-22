@@ -18,6 +18,6 @@ def proc_tree(tmp_path):
             s = 3.0 + i
             lines.append(f"{h:6.1f} {d:7.2f} {s:6.2f}")
         (root / fname).write_text("\n".join(lines) + "\n")
-    (root / "VAD_77_20260919_080000.hpl").write_text("Filename:\tx\n")
+    (root / "User1_77_20260919_080000.hpl").write_text("Filename:\tx\n")
     (root / "notes.txt").write_text("not an hpl file\n")
     return tmp_path / "Data" / "Proc"

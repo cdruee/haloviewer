@@ -94,6 +94,10 @@ class FileEntry:
 # -------------------------------------------------------------------------
 
 PROFILE_MODE = 'profile'
+#: Internal mode key kept as "timeseries" for backward compatibility;
+#: the GUI shows this mode to the user as "History" (it now covers not
+#: just the wind-profile height/time image but the same binned,
+#: intensity/beta "scan history" image for VAD/Stare/RHI/Wind_Profile).
 TIMESERIES_MODE = 'timeseries'
 
 
@@ -109,6 +113,14 @@ class KindInfo:
 # Kinds with full plotting support. Kinds discovered on disk that are not
 # listed here still show up (so the user can see what's in their data
 # tree) but are reported as "not yet implemented" -- see api.plot_file.
+#
+# Only Processed_Wind_Profile and RHI have a "Profile" mode (a single
+# scan shown by itself); the GUI greys out the Profile radio button for
+# every other kind. Every supported kind has "History" (the internal
+# TIMESERIES_MODE key) -- a multiple-file, time-binned image, built from
+# either the processed height/direction/speed profile (for
+# Processed_Wind_Profile) or the raw per-gate intensity/beta from the
+# regular scan files (for VAD/Stare/Wind_Profile/RHI).
 KIND_CAPABILITIES: Dict[str, KindInfo] = {
     'Processed_Wind_Profile': KindInfo(
         name='Processed_Wind_Profile',
@@ -116,6 +128,36 @@ KIND_CAPABILITIES: Dict[str, KindInfo] = {
         supported=True,
         description='Instrument-processed wind profile (height, '
                     'direction, speed).',
+    ),
+    'VAD': KindInfo(
+        name='VAD',
+        modes=(TIMESERIES_MODE,),
+        supported=True,
+        description='Conical (constant-elevation) scan: raw intensity '
+                    'and backscatter (beta) history only.',
+    ),
+    'Stare': KindInfo(
+        name='Stare',
+        modes=(TIMESERIES_MODE,),
+        supported=True,
+        description='Fixed-pointing scan: raw intensity and '
+                    'backscatter (beta) history only.',
+    ),
+    'Wind_Profile': KindInfo(
+        name='Wind_Profile',
+        modes=(TIMESERIES_MODE,),
+        supported=True,
+        description='Raw multi-beam scan behind the processed wind '
+                    'profile: intensity and backscatter (beta) history '
+                    'only.',
+    ),
+    'RHI': KindInfo(
+        name='RHI',
+        modes=(PROFILE_MODE, TIMESERIES_MODE),
+        supported=True,
+        description='Range-height indicator (vertical) scan: a single '
+                    'scan\'s distance/height cross section (radial '
+                    'velocity, beta), or an intensity/beta history.',
     ),
 }
 

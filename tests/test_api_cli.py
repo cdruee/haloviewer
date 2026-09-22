@@ -24,7 +24,7 @@ def test_plot_files_timeseries(proc_tree, tmp_path):
 
 def test_unsupported_kind_raises(proc_tree):
     result = scan_directory(proc_tree)
-    entry = result.files("VAD")[0]
+    entry = result.files("User1")[0]
     try:
         api.plot_file(entry.path)
         assert False, "expected NotImplementedError"

@@ -24,9 +24,9 @@ def test_parse_filename_rejects_non_hpl():
 
 def test_scan_directory_classifies_and_skips(proc_tree):
     result = scan_directory(proc_tree)
-    assert set(result.kinds()) == {"Processed_Wind_Profile", "VAD"}
+    assert set(result.kinds()) == {"Processed_Wind_Profile", "User1"}
     assert result.count("Processed_Wind_Profile") == 3
-    assert result.count("VAD") == 1
+    assert result.count("User1") == 1
     assert not any(p.endswith("notes.txt") for p in result.skipped)
 
     lo, hi = result.time_range("Processed_Wind_Profile")
@@ -38,6 +38,15 @@ def test_kind_capabilities():
     info = get_kind_info("Processed_Wind_Profile")
     assert info.supported
     assert "profile" in info.modes and "timeseries" in info.modes
+
+    for kind in ("VAD", "Stare", "Wind_Profile"):
+        raw = get_kind_info(kind)
+        assert raw.supported
+        assert raw.modes == ("timeseries",)
+
+    rhi = get_kind_info("RHI")
+    assert rhi.supported
+    assert set(rhi.modes) == {"profile", "timeseries"}
 
     unknown = get_kind_info("Something_Else")
     assert not unknown.supported

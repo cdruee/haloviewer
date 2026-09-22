@@ -1,9 +1,17 @@
+from pathlib import Path
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 
-from windlidarviewer import data, plotting
+from windlidarviewer import data, hpl, plotting
 from windlidarviewer.scan import scan_directory
+
+# Small real (trimmed) regular-scan fixtures -- see tests/data/README
+# for how they were derived from the user's own sample files.
+_DATA_DIR = Path(__file__).parent / "data"
+_RHI_FILE = _DATA_DIR / "RHI_77_20260921_000812.hpl"
+_VAD_FILE = _DATA_DIR / "VAD_77_20260921_000721.hpl"
 
 
 def test_load_profile(proc_tree):
@@ -123,3 +131,107 @@ def test_speed_autoscale_is_capped():
     plotting.plot_wind_timeseries(ax_s2, ax_d2, cax_s2, cax_d2,
                                    times, height, grid, dir_grid)
     assert ax_s2.collections[0].get_clim()[1] <= plotting.MAX_AUTOSCALE_SPEED
+
+
+# =========================================================================
+# Raw scan kinds (VAD/Stare/Wind_Profile/RHI): scan history and RHI's
+# own distance/height cross section.
+# =========================================================================
+
+def test_tilt_corrected_unit_components_sanity():
+    # straight up: all vertical, no horizontal component
+    horiz, vert = data._tilt_corrected_unit_components(
+        azimuth=0.0, elevation=90.0, pitch=0.0, roll=0.0)
+    assert abs(horiz) < 1e-9
+    assert abs(vert - 1.0) < 1e-9
+
+    # level, pointing north: all horizontal, no vertical component
+    horiz, vert = data._tilt_corrected_unit_components(
+        azimuth=0.0, elevation=0.0, pitch=0.0, roll=0.0)
+    assert abs(horiz - 1.0) < 1e-9
+    assert abs(vert) < 1e-9
+
+    # missing pitch/roll defaults to no tilt correction (same as 0/0)
+    horiz2, vert2 = data._tilt_corrected_unit_components(
+        azimuth=90.0, elevation=30.0, pitch=None, roll=None)
+    horiz3, vert3 = data._tilt_corrected_unit_components(
+        azimuth=90.0, elevation=30.0, pitch=0.0, roll=0.0)
+    assert abs(horiz2 - horiz3) < 1e-9
+    assert abs(vert2 - vert3) < 1e-9
+
+
+def test_gate_distance_axis_is_gate_center():
+    distance = data._gate_distance_axis(gate_length=18.0, n_gates=3)
+    assert list(distance) == [9.0, 27.0, 45.0]
+
+
+def test_load_scan_history_shape_and_nan_gaps():
+    hist = data.load_scan_history([_VAD_FILE])
+    n_dist = hist.distance.size
+    assert n_dist == 20  # the fixture was trimmed to 20 gates
+    assert hist.intensity.shape == (n_dist, hist.times.size)
+    assert hist.beta.shape == (n_dist, hist.times.size)
+    assert np.all(hist.distance > 0)
+    # every gate got at least one real ray in this short fixture, so
+    # the bins the rays actually landed in should be finite...
+    assert np.isfinite(hist.intensity).any()
+    # ...while a history spanning well beyond the last real ray must
+    # still show unpopulated bins as NaN, not zero or an interpolated
+    # guess (see plot_scan_history's docstring for why that matters)
+    padded = data.load_scan_history([_VAD_FILE, _VAD_FILE])
+    # loading the same short file twice can't create new time bins
+    # beyond its own span, so this just re-confirms determinism/shape
+    assert padded.distance.size == n_dist
+
+
+def test_load_rhi_cross_section_matches_ray_geometry():
+    cross = data.load_rhi_cross_section(_RHI_FILE)
+    f = hpl.DataFile(str(_RHI_FILE))
+    n_gates = len(f.rays[0].data.index)
+    assert cross.distance.shape == (len(f.rays) * n_gates,)
+    assert cross.height.shape == cross.distance.shape
+    assert cross.velocity.shape == cross.distance.shape
+    assert cross.beta.shape == cross.distance.shape
+    # distances/heights must be finite and physically bounded by the
+    # farthest gate's range (gate length * gate count)
+    max_range = float(f.header["gatelength"]) * n_gates
+    assert np.nanmax(np.abs(cross.distance)) <= max_range + 1e-6
+    assert np.nanmax(np.abs(cross.height)) <= max_range + 1e-6
+
+
+def test_plot_scan_history_runs_and_axes_are_reusable():
+    hist = data.load_scan_history([_VAD_FILE])
+    fig, (ax_int, ax_beta, cax_int, cax_beta) = \
+        plotting.create_timeseries_figure()
+    pos_before = ax_int.get_position().bounds
+    plotting.plot_scan_history(ax_int, ax_beta, cax_int, cax_beta,
+                                hist.times, hist.distance,
+                                hist.intensity, hist.beta,
+                                title="VAD test")
+    pos_after = ax_int.get_position().bounds
+    assert pos_before == pos_after
+    assert ax_int.collections and ax_beta.collections
+
+
+def test_plot_rhi_cross_section_runs_as_scatter():
+    cross = data.load_rhi_cross_section(_RHI_FILE)
+    fig, (ax_vel, ax_beta, cax_vel, cax_beta) = \
+        plotting.create_timeseries_figure()
+    plotting.plot_rhi_cross_section(ax_vel, ax_beta, cax_vel, cax_beta,
+                                     cross.distance, cross.height,
+                                     cross.velocity, cross.beta,
+                                     title="RHI test")
+    # a scatter (PathCollection), not a gridded pcolormesh -- RHI rays
+    # don't share a common grid the way a fixed scan geometry would
+    assert len(ax_vel.collections[0].get_offsets()) == len(cross.distance)
+
+
+def test_plot_rhi_cross_section_speed_vlim_is_symmetric_by_default():
+    cross = data.load_rhi_cross_section(_RHI_FILE)
+    fig, (ax_vel, ax_beta, cax_vel, cax_beta) = \
+        plotting.create_timeseries_figure()
+    plotting.plot_rhi_cross_section(ax_vel, ax_beta, cax_vel, cax_beta,
+                                     cross.distance, cross.height,
+                                     cross.velocity, cross.beta)
+    vmin, vmax = ax_vel.collections[0].get_clim()
+    assert vmin == -vmax

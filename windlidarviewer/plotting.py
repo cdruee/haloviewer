@@ -26,6 +26,15 @@ Colour choices:
   matplotlib's ``twilight``, a perceptually-uniform *cyclic* colormap
   that is far more accessible than traditional cyclic choices like
   ``hsv`` or ``jet``.
+* Intensity (a sequential quantity, the raw scan kinds' SNR+1) uses
+  ``cividis``, another perceptually-uniform sequential colormap, chosen
+  to look visually distinct from speed's ``viridis`` at a glance.
+* Beta / backscatter (also sequential) uses ``magma``, likewise
+  perceptually uniform and distinct from both of the above.
+* Radial velocity (RHI's Doppler value, which is signed -- towards vs.
+  away from the instrument) uses ``PuOr``, a perceptually-balanced
+  *diverging* colormap that avoids the red/green endpoints most likely
+  to be confused under red-green colour vision deficiency.
 """
 
 from __future__ import annotations
@@ -37,13 +46,18 @@ import numpy as np
 from matplotlib.figure import Figure
 
 __all__ = [
-    'SPEED_CMAP', 'DIRECTION_CMAP', 'MAX_AUTOSCALE_SPEED',
+    'SPEED_CMAP', 'DIRECTION_CMAP', 'INTENSITY_CMAP', 'BETA_CMAP',
+    'VELOCITY_CMAP', 'MAX_AUTOSCALE_SPEED',
     'create_profile_figure', 'plot_wind_profile',
     'create_timeseries_figure', 'plot_wind_timeseries',
+    'plot_scan_history', 'plot_rhi_cross_section',
 ]
 
 SPEED_CMAP = 'viridis'
 DIRECTION_CMAP = 'twilight'
+INTENSITY_CMAP = 'cividis'
+BETA_CMAP = 'magma'
+VELOCITY_CMAP = 'PuOr'
 
 _SPEED_COLOR = '#1b6ca8'      # colorblind-safe blue
 _DIRECTION_COLOR = '#d55e00'  # colorblind-safe vermillion (Okabe-Ito)
@@ -68,6 +82,24 @@ def _auto_speed_max(speed: np.ndarray, pad: float = 1.1) -> float:
     else:
         vmax = 1.0
     return min(vmax, MAX_AUTOSCALE_SPEED)
+
+
+def _auto_vlim(values: np.ndarray, lo_pct: float = 2.0,
+                hi_pct: float = 98.0) -> Tuple[float, float]:
+    """Autoscaled ``(vmin, vmax)`` for a colour range with no natural
+    fixed scale (intensity, beta): the ``lo_pct``/``hi_pct`` percentiles
+    of the finite values, rather than the raw min/max, so a handful of
+    extreme outliers (very common in raw beta, which is dominated by
+    near-zero noise with occasional real-signal spikes) don't wash out
+    the whole scale."""
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return 0.0, 1.0
+    vmin = float(np.percentile(finite, lo_pct))
+    vmax = float(np.percentile(finite, hi_pct))
+    if vmax <= vmin:
+        vmax = vmin + 1.0
+    return vmin, vmax
 
 
 def _break_circular_line(along: np.ndarray, other: np.ndarray,
@@ -208,12 +240,18 @@ def create_timeseries_figure(
         figsize: Tuple[float, float] = (10.0, 6.0),
         fig: Optional[Figure] = None) -> Tuple[Figure, tuple]:
     """
-    Create a figure with two vertically-stacked panels (speed on top,
-    direction below) sharing a horizontal time axis *and* a vertical
-    height axis (so panning/zooming height in one panel keeps the other
-    in sync, matching the profile plot's shared height axis), each with
-    its own colorbar, a small gap between the panels, and a fixed
-    subplot layout.
+    Create a figure with two vertically-stacked panels sharing a
+    horizontal x axis *and* a vertical y axis (so panning/zooming one
+    panel keeps the other in sync), each with its own colorbar, a small
+    gap between the panels, and a fixed subplot layout.
+
+    This is the shared "two stacked, colour-mapped panels" layout for
+    every kind of History plot (:func:`plot_wind_timeseries` for
+    ``Processed_Wind_Profile``'s speed/direction,
+    :func:`plot_scan_history` for the raw scan kinds' intensity/beta)
+    *and* for RHI's own Profile mode (:func:`plot_rhi_cross_section`,
+    a scatter rather than a gridded image, but the same axes shape) --
+    the content differs, the geometry doesn't.
 
     :param figsize: figure size in inches. Ignored if ``fig`` is given.
     :param fig: an existing (empty) figure to build the axes on; see \
@@ -307,3 +345,164 @@ def plot_wind_timeseries(
 
     if title:
         ax_speed.figure.suptitle(title)
+
+
+# =========================================================================
+# Scan history plot (VAD/Stare/RHI/Wind_Profile): intensity/beta vs.
+# time and gate-inferred distance. Same panel shape as the wind
+# timeseries plot above (built by the same create_timeseries_figure);
+# see that function's docstring.
+# =========================================================================
+
+def plot_scan_history(
+        ax_int, ax_beta, cax_int, cax_beta,
+        times: Sequence, distance: np.ndarray,
+        intensity: np.ndarray, beta: np.ndarray,
+        *,
+        distance_ylim: Optional[Tuple[float, float]] = None,
+        title: Optional[str] = None) -> None:
+    """
+    Draw a distance-vs-time image of raw intensity and beta into an
+    existing set of axes created by :func:`create_timeseries_figure`.
+    Clears and redraws in place, same as :func:`plot_wind_timeseries`.
+
+    Cells that were never populated (see
+    :func:`windlidarviewer.data.load_scan_history`) are ``nan``;
+    ``pcolormesh`` leaves ``nan`` cells uncoloured, so an empty time bin
+    shows as blank background rather than an interpolated guess.
+
+    :param ax_int: top axes (intensity image).
+    :param ax_beta: bottom axes (beta image), sharing x with ``ax_int``.
+    :param cax_int: colorbar axes for the intensity image.
+    :param cax_beta: colorbar axes for the beta image.
+    :param times: 1-D sequence of ``n_time`` bin-center timestamps.
+    :param distance: 1-D array of ``n_distance`` gate-center distances (m).
+    :param intensity: ``(n_distance, n_time)`` array, SNR + 1.
+    :param beta: ``(n_distance, n_time)`` array, attenuated backscatter.
+    :param distance_ylim: fixed ``(min, max)`` for the shared distance \
+        axis; if ``None``, chosen from the data.
+    :param title: optional title drawn above the intensity panel.
+    """
+    ax_int.cla()
+    ax_beta.cla()
+    cax_int.cla()
+    cax_beta.cla()
+
+    vmin_i, vmax_i = _auto_vlim(intensity)
+    mesh_i = ax_int.pcolormesh(
+        times, distance, intensity, shading='nearest',
+        cmap=INTENSITY_CMAP, vmin=vmin_i, vmax=vmax_i)
+    fig = ax_int.figure
+    fig.colorbar(mesh_i, cax=cax_int, label='Intensity (SNR + 1)')
+    ax_int.set_ylabel('Distance (m)')
+    ax_int.tick_params(axis='x', labelbottom=False)
+
+    vmin_b, vmax_b = _auto_vlim(beta)
+    mesh_b = ax_beta.pcolormesh(
+        times, distance, beta, shading='nearest',
+        cmap=BETA_CMAP, vmin=vmin_b, vmax=vmax_b)
+    fig.colorbar(mesh_b, cax=cax_beta, label='Beta (m⁻¹ sr⁻¹)')
+    ax_beta.set_ylabel('Distance (m)')
+    ax_beta.set_xlabel('Time (UTC)')
+
+    if distance_ylim is not None:
+        ax_int.set_ylim(*distance_ylim)
+    elif distance.size:
+        ax_int.set_ylim(float(np.nanmin(distance)), float(np.nanmax(distance)))
+
+    locator = mdates.AutoDateLocator()
+    formatter = mdates.ConciseDateFormatter(locator)
+    ax_beta.xaxis.set_major_locator(locator)
+    ax_beta.xaxis.set_major_formatter(formatter)
+
+    if title:
+        ax_int.figure.suptitle(title)
+
+
+# =========================================================================
+# RHI cross section plot: a single scan's distance/height cross
+# section, radial velocity and beta as colour-coded scatter points
+# (rays don't share a common distance/height grid the way a fixed scan
+# geometry would, so this is not gridded like the images above). Same
+# panel shape as the two plots above, again from create_timeseries_figure.
+# =========================================================================
+
+def plot_rhi_cross_section(
+        ax_vel, ax_beta, cax_vel, cax_beta,
+        distance: np.ndarray, height: np.ndarray,
+        velocity: np.ndarray, beta: np.ndarray,
+        *,
+        distance_xlim: Optional[Tuple[float, float]] = None,
+        height_ylim: Optional[Tuple[float, float]] = None,
+        speed_vlim: Optional[Tuple[float, float]] = None,
+        title: Optional[str] = None,
+        marker_size: float = 6.0) -> None:
+    """
+    Draw one RHI scan's distance/height cross section into an existing
+    set of axes created by :func:`create_timeseries_figure`: radial
+    velocity on top, beta below, each point placed by its own
+    (tilt-corrected) horizontal distance and height and coloured by
+    value. Clears and redraws in place.
+
+    :param ax_vel: top axes (radial velocity scatter).
+    :param ax_beta: bottom axes (beta scatter), sharing x/y with \
+        ``ax_vel``.
+    :param cax_vel: colorbar axes for the velocity scatter.
+    :param cax_beta: colorbar axes for the beta scatter.
+    :param distance: 1-D array of horizontal distance (m), one per point.
+    :param height: 1-D array of height (m), same shape as ``distance``.
+    :param velocity: 1-D array of radial (Doppler) velocity (m/s).
+    :param beta: 1-D array of attenuated backscatter.
+    :param distance_xlim: fixed ``(min, max)`` for the shared distance \
+        (x) axis; if ``None``, chosen from the data.
+    :param height_ylim: fixed ``(min, max)`` for the shared height \
+        (y) axis; if ``None``, chosen from the data.
+    :param speed_vlim: fixed ``(min, max)`` colour range for radial \
+        velocity; if ``None``, a symmetric range from the data's \
+        magnitude, capped like :data:`MAX_AUTOSCALE_SPEED`. Beta \
+        always autoscales from its own data (see \
+        :func:`_auto_vlim`) -- there is no separate manual control \
+        for it.
+    :param title: optional title drawn above the velocity panel.
+    """
+    ax_vel.cla()
+    ax_beta.cla()
+    cax_vel.cla()
+    cax_beta.cla()
+
+    if speed_vlim is not None:
+        vmin, vmax = speed_vlim
+    else:
+        vmax = _auto_speed_max(np.abs(velocity), pad=1.0)
+        vmin = -vmax
+
+    sc_vel = ax_vel.scatter(distance, height, c=velocity, cmap=VELOCITY_CMAP,
+                             vmin=vmin, vmax=vmax, s=marker_size,
+                             linewidths=0)
+    fig = ax_vel.figure
+    fig.colorbar(sc_vel, cax=cax_vel, label='Radial velocity (m/s)')
+    ax_vel.set_ylabel('Height (m)')
+    ax_vel.tick_params(axis='x', labelbottom=False)
+    ax_vel.grid(True, alpha=0.3)
+
+    bmin, bmax = _auto_vlim(beta)
+    sc_beta = ax_beta.scatter(distance, height, c=beta, cmap=BETA_CMAP,
+                               vmin=bmin, vmax=bmax, s=marker_size,
+                               linewidths=0)
+    fig.colorbar(sc_beta, cax=cax_beta, label='Beta (m⁻¹ sr⁻¹)')
+    ax_beta.set_ylabel('Height (m)')
+    ax_beta.set_xlabel('Distance (m)')
+    ax_beta.grid(True, alpha=0.3)
+
+    if distance_xlim is not None:
+        ax_vel.set_xlim(*distance_xlim)
+    elif distance.size:
+        ax_vel.set_xlim(float(np.nanmin(distance)), float(np.nanmax(distance)))
+
+    if height_ylim is not None:
+        ax_vel.set_ylim(*height_ylim)
+    elif height.size:
+        ax_vel.set_ylim(float(np.nanmin(height)), float(np.nanmax(height)))
+
+    if title:
+        ax_vel.figure.suptitle(title)

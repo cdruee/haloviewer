@@ -9,8 +9,11 @@ Trier), which is licensed under the European Union Public Licence v1.2
 (EUPL-1.2); this file is redistributed here under the same licence
 (see ``LICENSE-EUPL-1.2.txt`` at the project root). The rest of the
 ``windlidarviewer`` package is licensed separately (see ``LICENSE.txt``).
-Only cosmetic adaptations were made (module path, a couple of type-hint
-compatibility tweaks); the parsing logic is unchanged.
+Most changes are cosmetic (module path, a couple of type-hint
+compatibility tweaks); the one functional change is adding ``'Stare'``
+to :data:`TYPES`, so a ``Scan type: Stare`` header (a real Halo scan
+pattern the original whitelist didn't include) parses instead of
+raising.
 
 A ``.hpl`` file holds one scan of Doppler-lidar line-of-sight wind data.
 Two variants are supported:
@@ -62,7 +65,7 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------------------------------------
 
 MARKER = re.compile(r'^\s*[*]{2,}\s*$')
-TYPES = ['VAD', 'RHI', 'Wind profile', 'User1',
+TYPES = ['VAD', 'RHI', 'Wind profile', 'Stare', 'User1',
          'User2', 'User3', 'User4', 'User5',
          'Processed Wind Profile']
 

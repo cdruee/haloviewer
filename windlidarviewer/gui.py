@@ -12,6 +12,25 @@ This module only wires widgets to the pure functions in
 :mod:`windlidarviewer.plotting`; it contains no plotting logic of its
 own (see those modules' docstrings), and no file-format knowledge (see
 :mod:`windlidarviewer.hpl`).
+
+Four (kind, mode) combinations are plottable, each routed to its own
+load/render pair (see :meth:`WindLidarViewerApp._plot_kind`):
+
+* ``wind_profile`` -- ``Processed_Wind_Profile`` + Profile: one file's
+  height/speed/direction profile.
+* ``wind_timeseries`` -- ``Processed_Wind_Profile`` + History: many
+  files' height/time speed+direction image.
+* ``scan_history`` -- VAD/Stare/Wind_Profile/RHI + History: many
+  files' distance/time intensity+beta image (raw scans have no
+  instrument-processed profile of their own).
+* ``rhi_profile`` -- RHI + Profile: one scan's distance/height cross
+  section (radial velocity + beta), the only other kind with a Profile
+  mode.
+
+Three range controls (Height, Distance, Speed -- see
+:class:`_RangeControl`) sit in the left panel; which ones are enabled
+depends on the current plot kind (:meth:`WindLidarViewerApp.
+_update_range_controls_enabled`).
 """
 
 from __future__ import annotations
@@ -20,8 +39,9 @@ import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 from matplotlib.backends.backend_tkagg import (FigureCanvasTkAgg,
@@ -35,17 +55,17 @@ from .scan import (PROFILE_MODE, TIMESERIES_MODE, FileEntry, ScanResult,
 _TIME_FMT = '%Y-%m-%d %H:%M:%S'
 
 # Cap on how many files are opened just to establish stable axis limits
-# for profile browsing / a timeseries redraw, so a huge time range
-# doesn't make the GUI stall. Sampling evenly across the range still
-# gives a representative min/max in practice.
+# for profile browsing / a history redraw, so a huge time range doesn't
+# make the GUI stall. Sampling evenly across the range still gives a
+# representative min/max in practice.
 _MAX_FILES_FOR_LIMITS = 300
 _MAX_FILES_FOR_TIMESERIES = 4000
 
-# Step size for the height range's up/down buttons: a round number
-# that scales with how tall the current (bottom, top) view is. Read as
-# "if the span is > threshold, use this step" -- the largest matching
-# threshold wins, so a very tall view still only steps by the 250 m cap
-# rather than growing without bound.
+# Step size tables for the Height/Distance/Speed range controls' up/down
+# buttons: a round number that scales with how wide the current
+# (bottom, top) view is. Read as "if the span is > threshold, use this
+# step" -- the largest matching threshold wins, so a very wide view
+# still only steps by the largest cap rather than growing without bound.
 _HEIGHT_STEP_TABLE = [
     (25.0, 2.5),
     (50.0, 5.0),
@@ -58,15 +78,47 @@ _HEIGHT_STEP_TABLE = [
 _HEIGHT_MIN_SPAN = 25.0  # the height view is never allowed to collapse
                          # narrower than this
 
+_DISTANCE_STEP_TABLE = [
+    (50.0, 5.0),
+    (100.0, 10.0),
+    (250.0, 25.0),
+    (500.0, 50.0),
+    (1000.0, 100.0),
+    (2500.0, 250.0),
+    (5000.0, 500.0),
+    (10000.0, 1000.0),
+]
+_DISTANCE_MIN_SPAN = 50.0
 
-def _height_step_size(span: float) -> float:
-    """Up/down step size for a height range view ``span`` metres tall;
-    see :data:`_HEIGHT_STEP_TABLE`."""
-    step = _HEIGHT_STEP_TABLE[0][1]
-    for threshold, s in _HEIGHT_STEP_TABLE:
+_SPEED_STEP_TABLE = [
+    (5.0, 0.5),
+    (10.0, 1.0),
+    (25.0, 2.5),
+    (50.0, 5.0),
+    (100.0, 10.0),
+]
+_SPEED_MIN_SPAN = 2.0
+
+
+def _table_step_size(table: List[Tuple[float, float]], span: float) -> float:
+    """Up/down step size for a range control whose current view is
+    ``span`` wide; see e.g. :data:`_HEIGHT_STEP_TABLE`."""
+    step = table[0][1]
+    for threshold, s in table:
         if span > threshold:
             step = s
     return step
+
+
+def _pad_range(lo: Optional[float], hi: Optional[float],
+               default: Tuple[float, float] = (0.0, 1.0)
+               ) -> Tuple[float, float]:
+    """``(lo, hi)`` widened by a small margin, or ``default`` if no data
+    was seen at all (``lo is None``)."""
+    if lo is None:
+        return default
+    pad = (hi - lo) * 0.03 if hi > lo else 1.0
+    return lo - pad, hi + pad
 
 
 # Quick time-range presets shown as radio buttons between the end-time
@@ -95,6 +147,166 @@ def _sample(entries: List[FileEntry], n: int) -> List[FileEntry]:
     return [entries[int(i * step)] for i in range(n)]
 
 
+class _RangeControl:
+    """
+    A ``ttk.LabelFrame`` with Bottom/Top numeric fields (each with an
+    inline ▲/▼ stepper) and an "Auto" checkbox -- the reusable shape
+    behind the Height, Distance and Speed controls in the left panel.
+
+    "Auto" means the owning app computes a natural range (from the
+    data, or by reading back the plotted axes) and mirrors it into
+    these -- then disabled, display-only -- fields. Turning Auto off
+    hands the fields back for manual entry/stepping, and the value the
+    fields hold is then used verbatim.
+
+    This class only owns the widgets and the stepping arithmetic; it
+    has no idea what it controls or how to redraw a plot -- that's the
+    two callbacks the owning app supplies.
+    """
+
+    def __init__(self, parent: ttk.Frame, row: int, *, title: str,
+                 bottom_label: str, top_label: str, default_bottom: str,
+                 step_table: List[Tuple[float, float]], min_span: float,
+                 on_auto_toggle, on_manual_change):
+        self.step_table = step_table
+        self.min_span = min_span
+        self.on_auto_toggle = on_auto_toggle
+        self.on_manual_change = on_manual_change
+
+        # Bottom and Top sit side by side, each as a label above one
+        # row of [entry][up][down] -- this keeps the control only as
+        # tall as a single entry/button row instead of stacking the
+        # up/down buttons above one another.
+        self.frame = ttk.LabelFrame(parent, text=title)
+        self.frame.grid(row=row, column=0, sticky='we', pady=(0, 8))
+        self.frame.columnconfigure(0, weight=1)
+        self.frame.columnconfigure(1, weight=1)
+
+        self.bottom_var = tk.StringVar(value=default_bottom)
+        self.top_var = tk.StringVar(value='')
+
+        ttk.Label(self.frame, text=bottom_label).grid(
+            row=0, column=0, sticky='w', padx=(4, 2), pady=(2, 0))
+        ttk.Label(self.frame, text=top_label).grid(
+            row=0, column=1, sticky='w', padx=(2, 4), pady=(2, 0))
+
+        bottom_row = ttk.Frame(self.frame)
+        bottom_row.grid(row=1, column=0, sticky='we', padx=(4, 2))
+        bottom_row.columnconfigure(0, weight=1)
+        self.bottom_entry = ttk.Entry(
+            bottom_row, textvariable=self.bottom_var, width=7)
+        self.bottom_entry.grid(row=0, column=0, sticky='we')
+        self.bottom_entry.bind(
+            '<Return>', lambda e: self.on_manual_change())
+        self.bottom_up = ttk.Button(
+            bottom_row, text='▲', width=2,
+            command=lambda: self._step('bottom', 1))
+        self.bottom_up.grid(row=0, column=1)
+        self.bottom_down = ttk.Button(
+            bottom_row, text='▼', width=2,
+            command=lambda: self._step('bottom', -1))
+        self.bottom_down.grid(row=0, column=2)
+
+        top_row = ttk.Frame(self.frame)
+        top_row.grid(row=1, column=1, sticky='we', padx=(2, 4))
+        top_row.columnconfigure(0, weight=1)
+        self.top_entry = ttk.Entry(
+            top_row, textvariable=self.top_var, width=7)
+        self.top_entry.grid(row=0, column=0, sticky='we')
+        self.top_entry.bind('<Return>', lambda e: self.on_manual_change())
+        self.top_up = ttk.Button(
+            top_row, text='▲', width=2,
+            command=lambda: self._step('top', 1))
+        self.top_up.grid(row=0, column=1)
+        self.top_down = ttk.Button(
+            top_row, text='▼', width=2,
+            command=lambda: self._step('top', -1))
+        self.top_down.grid(row=0, column=2)
+
+        self.auto_var = tk.BooleanVar(value=True)
+        self.auto_check = ttk.Checkbutton(
+            self.frame, text='Auto', variable=self.auto_var,
+            command=self._on_auto_toggle)
+        self.auto_check.grid(
+            row=2, column=0, columnspan=2, sticky='w', padx=4, pady=(2, 4))
+
+        self._manual_widgets = (
+            self.bottom_entry, self.top_entry,
+            self.bottom_up, self.bottom_down,
+            self.top_up, self.top_down)
+        # Auto starts on, so the (not yet meaningful) manual controls
+        # start disabled -- _on_auto_toggle sets this consistently any
+        # time Auto is toggled, this just matches that at startup.
+        for w in self._manual_widgets:
+            w.configure(state='disabled')
+
+    # -- enable/disable the whole control (kind/mode-dependent greying) --
+
+    def set_enabled(self, enabled: bool) -> None:
+        if enabled:
+            self.auto_check.configure(state='normal')
+            manual_state = 'disabled' if self.auto_var.get() else 'normal'
+            for w in self._manual_widgets:
+                w.configure(state=manual_state)
+        else:
+            self.auto_check.configure(state='disabled')
+            for w in self._manual_widgets:
+                w.configure(state='disabled')
+
+    # -- value access ---------------------------------------------------
+
+    def display_range(self) -> Optional[Tuple[float, float]]:
+        """Parse the Bottom/Top fields as floats, or ``None`` if either
+        is currently empty/invalid."""
+        try:
+            bottom = float(self.bottom_var.get())
+            top = float(self.top_var.get())
+        except (TypeError, ValueError):
+            return None
+        return bottom, top
+
+    def set_display_range(self, lo: float, hi: float) -> None:
+        self.bottom_var.set(f'{lo:.1f}')
+        self.top_var.set(f'{hi:.1f}')
+
+    # -- internal ---------------------------------------------------------
+
+    def _on_auto_toggle(self) -> None:
+        auto = self.auto_var.get()
+        state = 'disabled' if auto else 'normal'
+        for w in self._manual_widgets:
+            w.configure(state=state)
+        self.on_auto_toggle()
+
+    def _step(self, which: str, direction: int) -> None:
+        """Step Bottom or Top by the current step size, snapping the
+        result to a multiple of that step size (0, step, 2*step, ...)
+        rather than just adding it to whatever fractional value is
+        currently shown -- so repeated stepping (and stepping after
+        Auto seeded a non-round value) always lands on round numbers,
+        the same "snap to a grid" rule the time-window Back/Forward
+        buttons use."""
+        rng = self.display_range()
+        if rng is None:
+            return
+        bottom, top = rng
+        step = _table_step_size(self.step_table, max(top - bottom, self.min_span))
+        if which == 'bottom':
+            new_bottom = (round(bottom / step) + direction) * step
+            # refuse a step that would shrink the span below the
+            # minimum, rather than overshooting the other end to force
+            # it back to exactly the minimum -- growing the span (the
+            # other direction) is always allowed
+            if top - new_bottom >= self.min_span:
+                bottom = new_bottom
+        else:
+            new_top = (round(top / step) + direction) * step
+            if new_top - bottom >= self.min_span:
+                top = new_top
+        self.set_display_range(bottom, top)
+        self.on_manual_change()
+
+
 class WindLidarViewerApp:
     """Top-level application: owns the Tk widgets and the currently
     scanned/selected state, and delegates all data loading to
@@ -108,27 +320,33 @@ class WindLidarViewerApp:
 
         self.scan_result: Optional[ScanResult] = None
         self.current_kind: Optional[str] = None
-        self.current_mode: Optional[str] = None
         self.current_index: int = 0
         self.current_files: List[FileEntry] = []
 
-        # figure/axes are only (re)created when the kind or mode
-        # changes -- not on every navigation step -- so the panel
-        # geometry never moves while stepping through files.
+        # figure/axes are only (re)created when the *plot kind* (see
+        # _plot_kind) changes -- not on every navigation step -- so the
+        # panel geometry never moves while stepping through files.
         self.fig = None
         self.axes = None
+        self.current_plot_kind: Optional[str] = None
         self.canvas: Optional[FigureCanvasTkAgg] = None
         self.toolbar: Optional[NavigationToolbar2Tk] = None
 
-        self._speed_xlim = None
+        # explicit axis/colour ranges resolved by _resolve_range (or,
+        # for height, read back from the axes) just before each redraw
         self._height_ylim = None
+        self._distance_xlim = None
+        self._speed_range = None
 
-        # last-loaded data, kept so the height-range control can redraw
+        # last-loaded data, kept so the range controls can redraw
         # (e.g. after a stepper click) without re-reading files from disk
         self._last_profile = None
         self._last_series = None
+        self._last_history = None
+        self._last_rhi = None
 
         self._build_widgets()
+        self._update_range_controls_enabled(None)
 
         if initial_dir:
             self.dir_var.set(str(initial_dir))
@@ -200,77 +418,43 @@ class WindLidarViewerApp:
             variable=self.mode_var, command=self._on_mode_select)
         self.profile_radio.grid(row=0, column=0, sticky='w', padx=(0, 8))
         self.timeseries_radio = ttk.Radiobutton(
-            mode_frame, text='Time series', value=TIMESERIES_MODE,
+            mode_frame, text='History', value=TIMESERIES_MODE,
             variable=self.mode_var, command=self._on_mode_select)
         self.timeseries_radio.grid(row=0, column=1, sticky='w')
         row += 1
 
-        # -- height range ---------------------------------------------------
-        # Bottom and Top sit side by side, each as a label above one row
-        # of [entry][up][down] -- this keeps the control only as tall as
-        # a single entry/button row instead of stacking the up/down
-        # buttons above one another.
-        height_frame = ttk.LabelFrame(parent, text='Height')
-        height_frame.grid(row=row, column=0, sticky='we', pady=(0, 8))
-        height_frame.columnconfigure(0, weight=1)
-        height_frame.columnconfigure(1, weight=1)
+        # -- range controls: Height (vertical axis -- height for the
+        # processed profile/history, gate-inferred distance for the raw
+        # scan history and RHI's own vertical axis), Distance (RHI
+        # Profile's horizontal cross-section axis only) and Speed (wind
+        # speed / radial velocity colour-or-axis range) -- all the same
+        # shape, see _RangeControl. --------------------------------------
+        self.height_ctrl = _RangeControl(
+            parent, row, title='Height',
+            bottom_label='Bottom (m)', top_label='Top (m)',
+            default_bottom='0', step_table=_HEIGHT_STEP_TABLE,
+            min_span=_HEIGHT_MIN_SPAN,
+            on_auto_toggle=self._on_height_auto_toggle,
+            on_manual_change=self._redraw_height_range)
         row += 1
 
-        self.height_bottom_var = tk.StringVar(value='0')
-        self.height_top_var = tk.StringVar(value='')
+        self.distance_ctrl = _RangeControl(
+            parent, row, title='Distance',
+            bottom_label='Near (m)', top_label='Far (m)',
+            default_bottom='0', step_table=_DISTANCE_STEP_TABLE,
+            min_span=_DISTANCE_MIN_SPAN,
+            on_auto_toggle=self._on_distance_auto_toggle,
+            on_manual_change=self._redraw_distance_range)
+        row += 1
 
-        ttk.Label(height_frame, text='Bottom (m)').grid(
-            row=0, column=0, sticky='w', padx=(4, 2), pady=(2, 0))
-        ttk.Label(height_frame, text='Top (m)').grid(
-            row=0, column=1, sticky='w', padx=(2, 4), pady=(2, 0))
-
-        bottom_row = ttk.Frame(height_frame)
-        bottom_row.grid(row=1, column=0, sticky='we', padx=(4, 2))
-        bottom_row.columnconfigure(0, weight=1)
-        self.height_bottom_entry = ttk.Entry(
-            bottom_row, textvariable=self.height_bottom_var, width=7)
-        self.height_bottom_entry.grid(row=0, column=0, sticky='we')
-        self.height_bottom_entry.bind(
-            '<Return>', lambda e: self._on_height_entry_change())
-        self.height_bottom_up = ttk.Button(
-            bottom_row, text='▲', width=2,
-            command=lambda: self._step_height('bottom', 1))
-        self.height_bottom_up.grid(row=0, column=1)
-        self.height_bottom_down = ttk.Button(
-            bottom_row, text='▼', width=2,
-            command=lambda: self._step_height('bottom', -1))
-        self.height_bottom_down.grid(row=0, column=2)
-
-        top_row = ttk.Frame(height_frame)
-        top_row.grid(row=1, column=1, sticky='we', padx=(2, 4))
-        top_row.columnconfigure(0, weight=1)
-        self.height_top_entry = ttk.Entry(
-            top_row, textvariable=self.height_top_var, width=7)
-        self.height_top_entry.grid(row=0, column=0, sticky='we')
-        self.height_top_entry.bind(
-            '<Return>', lambda e: self._on_height_entry_change())
-        self.height_top_up = ttk.Button(
-            top_row, text='▲', width=2,
-            command=lambda: self._step_height('top', 1))
-        self.height_top_up.grid(row=0, column=1)
-        self.height_top_down = ttk.Button(
-            top_row, text='▼', width=2,
-            command=lambda: self._step_height('top', -1))
-        self.height_top_down.grid(row=0, column=2)
-
-        self.height_auto_var = tk.BooleanVar(value=True)
-        self.height_auto_check = ttk.Checkbutton(
-            height_frame, text='Auto', variable=self.height_auto_var,
-            command=self._on_height_auto_toggle)
-        self.height_auto_check.grid(
-            row=2, column=0, columnspan=2, sticky='w', padx=4, pady=(2, 4))
-        # Auto starts on, so the (not yet meaningful) manual controls
-        # start disabled -- _on_height_auto_toggle sets this consistently
-        # any time Auto is toggled, this just matches that at startup.
-        for w in (self.height_bottom_entry, self.height_top_entry,
-                  self.height_bottom_up, self.height_bottom_down,
-                  self.height_top_up, self.height_top_down):
-            w.configure(state='disabled')
+        self.speed_ctrl = _RangeControl(
+            parent, row, title='Speed',
+            bottom_label='Min (m/s)', top_label='Max (m/s)',
+            default_bottom='0', step_table=_SPEED_STEP_TABLE,
+            min_span=_SPEED_MIN_SPAN,
+            on_auto_toggle=self._on_speed_auto_toggle,
+            on_manual_change=self._redraw_speed_range)
+        row += 1
 
         # -- time range: Start time / quick presets / End time, all inside
         # one "Time" frame. Apply range and the First/Back/Forward/Last
@@ -353,25 +537,28 @@ class WindLidarViewerApp:
         self.plot_container.grid(row=0, column=0, sticky='nswe')
         self.plot_container.columnconfigure(0, weight=1)
         self.plot_container.rowconfigure(0, weight=1)
-        self._set_mode_figure(PROFILE_MODE)
+        self._set_mode_figure('wind_profile')
 
     # ------------------------------------------------------------------
     # figure (re)creation
     # ------------------------------------------------------------------
 
-    def _set_mode_figure(self, mode: str) -> None:
-        """(Re)build the figure/canvas for ``mode``. Only called when
-        the mode actually changes, so panel geometry stays fixed while
-        stepping through files within a mode."""
+    def _set_mode_figure(self, plot_kind: str) -> None:
+        """(Re)build the figure/canvas for ``plot_kind`` (see
+        :meth:`_plot_kind`). Only called when the plot kind actually
+        changes, so panel geometry stays fixed while stepping through
+        files within a plot kind."""
         if self.canvas is not None:
             self.canvas.get_tk_widget().destroy()
         if self.toolbar is not None:
             self.toolbar.destroy()
 
-        if mode == TIMESERIES_MODE:
-            self.fig, self.axes = plotting.create_timeseries_figure()
-        else:
+        if plot_kind == 'wind_profile':
             self.fig, self.axes = plotting.create_profile_figure()
+        else:
+            # wind_timeseries, scan_history and rhi_profile all share
+            # the two-stacked-panels-with-colorbars shape.
+            self.fig, self.axes = plotting.create_timeseries_figure()
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.plot_container)
         self.canvas.get_tk_widget().grid(row=0, column=0, sticky='nswe')
@@ -379,7 +566,7 @@ class WindLidarViewerApp:
         toolbar_frame.grid(row=1, column=0, sticky='we')
         self.toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame)
         self.toolbar.update()
-        self.current_mode = mode
+        self.current_plot_kind = plot_kind
         self.canvas.draw_idle()
 
     def _show_message(self, text: str) -> None:
@@ -394,6 +581,7 @@ class WindLidarViewerApp:
         # the message figure has no fixed gridspec/axes to reuse, so
         # force a full rebuild next time a real plot is drawn
         self.axes = None
+        self.current_plot_kind = None
 
     # ------------------------------------------------------------------
     # directory scanning
@@ -439,6 +627,7 @@ class WindLidarViewerApp:
         else:
             self.current_kind = None
             self.current_files = []
+            self._update_range_controls_enabled(None)
             self._show_message(f'No .hpl files found under\n{path}')
             self.status_var.set(f'No .hpl files found under {path}.')
 
@@ -458,7 +647,8 @@ class WindLidarViewerApp:
         info = get_kind_info(kind)
 
         # enable/disable the mode radio buttons to match this kind's
-        # capabilities
+        # capabilities -- only Processed_Wind_Profile and RHI have a
+        # Profile mode; every other supported kind is greyed out there.
         self.profile_radio.configure(
             state='normal' if PROFILE_MODE in info.modes else 'disabled')
         self.timeseries_radio.configure(
@@ -466,7 +656,7 @@ class WindLidarViewerApp:
         if info.modes:
             if self.mode_var.get() not in info.modes:
                 self.mode_var.set(info.modes[0])
-        self.current_mode = None  # force figure rebuild in _refresh_mode
+        self.current_plot_kind = None  # force figure rebuild in _refresh_mode
 
         lo, hi = self.scan_result.time_range(kind)
         if lo is not None:
@@ -482,14 +672,42 @@ class WindLidarViewerApp:
     def _on_mode_select(self) -> None:
         self._refresh_mode()
 
-    def _refresh_mode(self) -> None:
+    def _plot_kind(self) -> Optional[str]:
+        """Which of the four load/render pipelines applies to the
+        current kind + selected mode, or ``None`` if nothing plottable
+        is selected. See the module docstring for what each one is."""
+        if not self.current_kind:
+            return None
         mode = self.mode_var.get()
+        if self.current_kind == 'Processed_Wind_Profile':
+            return 'wind_profile' if mode == PROFILE_MODE else 'wind_timeseries'
+        if self.current_kind == 'RHI' and mode == PROFILE_MODE:
+            return 'rhi_profile'
+        # VAD, Stare, Wind_Profile (History only) and RHI's own History
+        # all share the raw intensity/beta scan-history plot.
+        return 'scan_history'
+
+    def _update_range_controls_enabled(self, plot_kind: Optional[str]) -> None:
+        """Grey out the Height/Distance/Speed controls that don't apply
+        to the current plot kind: Height (the vertical axis) applies to
+        all four; Distance (the horizontal cross-section axis) only to
+        RHI's own Profile; Speed (the wind-speed/radial-velocity axis
+        or colour range) to everything with a speed dimension -- i.e.
+        everything except the raw scan history, whose two panels are
+        intensity and beta."""
+        self.height_ctrl.set_enabled(plot_kind is not None)
+        self.distance_ctrl.set_enabled(plot_kind == 'rhi_profile')
+        self.speed_ctrl.set_enabled(
+            plot_kind in ('wind_profile', 'wind_timeseries', 'rhi_profile'))
+
+    def _refresh_mode(self) -> None:
         info = get_kind_info(self.current_kind) if self.current_kind else None
 
         if info is None or not info.modes:
             self._update_nav_state()
-            if self.current_mode != PROFILE_MODE:
-                self._set_mode_figure(PROFILE_MODE)
+            self._update_range_controls_enabled(None)
+            if self.current_plot_kind != 'wind_profile':
+                self._set_mode_figure('wind_profile')
             message = ('No plottable data selected.' if info is None else
                        f'Plotting for "{self.current_kind}" is not '
                        f'implemented yet.')
@@ -497,14 +715,17 @@ class WindLidarViewerApp:
             self.status_var.set(message)
             return
 
-        self._update_nav_state()
-
+        mode = self.mode_var.get()
         if mode not in info.modes:
             mode = info.modes[0]
             self.mode_var.set(mode)
 
-        if self.current_mode != mode:
-            self._set_mode_figure(mode)
+        self._update_nav_state()
+
+        plot_kind = self._plot_kind()
+        self._update_range_controls_enabled(plot_kind)
+        if self.current_plot_kind != plot_kind:
+            self._set_mode_figure(plot_kind)
 
         self._apply_range()
 
@@ -565,12 +786,11 @@ class WindLidarViewerApp:
         self.current_files = self.scan_result.files_in_range(
             self.current_kind, start, end)
         self.current_index = 0
-        self._speed_xlim = None
         # a manually-set height range (Auto off) is a view preference,
         # not tied to which files are loaded -- keep it across a range
         # change; only the auto-computed range needs to be cleared so
         # it gets recomputed from the new file selection.
-        if self.height_auto_var.get():
+        if self.height_ctrl.auto_var.get():
             self._height_ylim = None
 
         if not self.current_files:
@@ -578,11 +798,17 @@ class WindLidarViewerApp:
             self.status_var.set('No files in the selected time range.')
             return
 
-        if self.current_mode == TIMESERIES_MODE:
-            self._draw_timeseries()
-        else:
+        # wind_profile/rhi_profile step through files one at a time, so
+        # their Height/Distance/Speed ranges are precomputed once from
+        # a sample of the whole selection here (kept fixed while
+        # stepping); wind_timeseries/scan_history load the whole
+        # selection in one go and resolve their own ranges from that.
+        plot_kind = self._plot_kind()
+        if plot_kind == 'wind_profile':
             self._compute_profile_limits()
-            self._draw_profile()
+        elif plot_kind == 'rhi_profile':
+            self._compute_rhi_profile_limits()
+        self._draw_current()
 
     # ------------------------------------------------------------------
     # navigation
@@ -653,14 +879,14 @@ class WindLidarViewerApp:
             self._window_to_data_edge('start')
             return
         self.current_index = 0
-        self._draw_profile()
+        self._draw_current()
 
     def _go_back(self) -> None:
         if self._interval_active():
             self._step_time_window(-1)
             return
         self.current_index = max(0, self.current_index - 1)
-        self._draw_profile()
+        self._draw_current()
 
     def _go_forward(self) -> None:
         if self._interval_active():
@@ -668,26 +894,74 @@ class WindLidarViewerApp:
             return
         self.current_index = min(len(self.current_files) - 1,
                                   self.current_index + 1)
-        self._draw_profile()
+        self._draw_current()
 
     def _go_last(self) -> None:
         if self._interval_active():
             self._window_to_data_edge('end')
             return
         self.current_index = len(self.current_files) - 1
-        self._draw_profile()
+        self._draw_current()
 
     # ------------------------------------------------------------------
-    # drawing
+    # drawing -- dispatch
+    # ------------------------------------------------------------------
+
+    def _draw_current(self) -> None:
+        """Load (from disk, if needed) and render whatever the current
+        plot kind is."""
+        plot_kind = self._plot_kind()
+        if plot_kind == 'wind_profile':
+            self._draw_profile()
+        elif plot_kind == 'wind_timeseries':
+            self._draw_timeseries()
+        elif plot_kind == 'scan_history':
+            self._draw_history()
+        elif plot_kind == 'rhi_profile':
+            self._draw_rhi_profile()
+
+    def _render_current(self) -> None:
+        """Redraw the plot kind that's actually built (:attr:`current_plot_kind`)
+        from its already-loaded data, without touching disk -- used by
+        the range controls after a stepper click or Auto toggle."""
+        plot_kind = self.current_plot_kind
+        if plot_kind == 'wind_profile':
+            self._render_profile()
+        elif plot_kind == 'wind_timeseries':
+            self._render_timeseries()
+        elif plot_kind == 'scan_history':
+            self._render_history()
+        elif plot_kind == 'rhi_profile':
+            self._render_rhi_profile()
+
+    def _resolve_range(self, ctrl: _RangeControl,
+                        natural: Tuple[float, float]) -> Tuple[float, float]:
+        """Distance/Speed always resolve to an explicit numeric range
+        to pass into the plotting functions, whether Auto or manual:
+        Auto means the range comes from the data (``natural``, also
+        mirrored read-only into the control's fields); manual means it
+        comes from the control's own fields. (Height instead passes
+        ``None`` in Auto mode and reads the result back from the axes
+        after rendering -- see :meth:`_sync_height_fields_from_axes` --
+        since matplotlib's own autoscaling already does that job for a
+        y axis; Distance/Speed have no such built-in autoscale to hook
+        into for a colour range or a scatter's x axis.)"""
+        if ctrl.auto_var.get():
+            ctrl.set_display_range(*natural)
+            return natural
+        rng = ctrl.display_range()
+        if rng is None or rng[1] <= rng[0]:
+            return natural
+        return rng
+
+    # ------------------------------------------------------------------
+    # drawing -- wind_profile (Processed_Wind_Profile, Profile mode)
     # ------------------------------------------------------------------
 
     def _compute_profile_limits(self) -> None:
         """Establish fixed speed/height axis limits from a sample of
         the current file selection, so stepping through files with
-        First/Back/Forward/Last never resizes the panels. Speed is
-        always recomputed; height only when the height range is in
-        Auto mode -- a manual range is a view preference the user set,
-        not something a new file selection should overwrite."""
+        First/Back/Forward/Last never resizes the panels."""
         sample = _sample(self.current_files, _MAX_FILES_FOR_LIMITS)
         speed_max = 1.0
         h_min, h_max = None, None
@@ -703,22 +977,21 @@ class WindLidarViewerApp:
                 hi = float(prof.height.max())
                 h_min = lo if h_min is None else min(h_min, lo)
                 h_max = hi if h_max is None else max(h_max, hi)
-        self._speed_xlim = (0.0, min(speed_max * 1.1, plotting.MAX_AUTOSCALE_SPEED))
-        if self.height_auto_var.get():
-            if h_min is not None:
-                pad = (h_max - h_min) * 0.03 if h_max > h_min else 1.0
-                self._height_ylim = (h_min - pad, h_max + pad)
-            else:
-                self._height_ylim = None
+
+        natural_speed = (0.0, min(speed_max * 1.1, plotting.MAX_AUTOSCALE_SPEED))
+        self._speed_range = self._resolve_range(self.speed_ctrl, natural_speed)
+
+        if self.height_ctrl.auto_var.get():
+            self._height_ylim = _pad_range(h_min, h_max) if h_min is not None else None
 
     def _draw_profile(self) -> None:
         """Load the current file and render it. Loading is the
         expensive part; :meth:`_render_profile` (called from here and
-        from the height-range control) is the cheap redraw-only path."""
+        from the range controls) is the cheap redraw-only path."""
         if not self.current_files:
             return
-        if self.axes is None or self.current_mode != PROFILE_MODE:
-            self._set_mode_figure(PROFILE_MODE)
+        if self.axes is None or self.current_plot_kind != 'wind_profile':
+            self._set_mode_figure('wind_profile')
         entry = self.current_files[self.current_index]
         try:
             self._last_profile = _data.load_profile(entry.path)
@@ -739,26 +1012,39 @@ class WindLidarViewerApp:
         ax_speed, ax_dir = self.axes
         plotting.plot_wind_profile(
             ax_speed, ax_dir, prof.height, prof.speed, prof.direction,
-            speed_xlim=self._speed_xlim, height_ylim=self._height_ylim,
+            speed_xlim=self._speed_range, height_ylim=self._height_ylim,
             title=f'{self.current_kind}  {prof.timestamp:%Y-%m-%d %H:%M:%S}')
         self.canvas.draw_idle()
         self._sync_height_fields_from_axes()
+
+    # ------------------------------------------------------------------
+    # drawing -- wind_timeseries (Processed_Wind_Profile, History mode)
+    # ------------------------------------------------------------------
+
+    def _compute_series_speed_range(self) -> None:
+        series = self._last_series
+        natural = (0.0, 1.0)
+        if series is not None and series.speed.size and np.any(np.isfinite(series.speed)):
+            vmax = float(np.nanmax(series.speed)) * 1.1
+            natural = (0.0, min(max(vmax, 1.0), plotting.MAX_AUTOSCALE_SPEED))
+        self._speed_range = self._resolve_range(self.speed_ctrl, natural)
 
     def _draw_timeseries(self) -> None:
         """Load the current file selection and render it; see
         :meth:`_draw_profile` for the load/render split."""
         if not self.current_files:
             return
-        if self.axes is None or self.current_mode != TIMESERIES_MODE:
-            self._set_mode_figure(TIMESERIES_MODE)
+        if self.axes is None or self.current_plot_kind != 'wind_timeseries':
+            self._set_mode_figure('wind_timeseries')
         files = self.current_files
         if len(files) > _MAX_FILES_FOR_TIMESERIES:
             files = _sample(files, _MAX_FILES_FOR_TIMESERIES)
         try:
             self._last_series = _data.load_profile_series(e.path for e in files)
         except (IOError, ValueError) as exc:
-            self._show_message(f'Could not build time series:\n{exc}')
+            self._show_message(f'Could not build history:\n{exc}')
             return
+        self._compute_series_speed_range()
         self._render_timeseries()
         self.status_var.set(f'{len(files)} file(s) in the selected range.')
 
@@ -777,23 +1063,131 @@ class WindLidarViewerApp:
         plotting.plot_wind_timeseries(
             ax_speed, ax_dir, cax_speed, cax_dir,
             series.times, series.height, series.speed, series.direction,
-            height_ylim=self._height_ylim, title=title)
+            height_ylim=self._height_ylim, speed_vlim=self._speed_range,
+            title=title)
         self.canvas.draw_idle()
         self._sync_height_fields_from_axes()
 
     # ------------------------------------------------------------------
-    # height range
+    # drawing -- scan_history (VAD/Stare/Wind_Profile/RHI, History mode)
     # ------------------------------------------------------------------
 
-    def _height_display_range(self):
-        """Parse the height Bottom/Top fields as floats, or ``None`` if
-        either is currently empty/invalid."""
+    def _draw_history(self) -> None:
+        """Load the current file selection and render it as a raw
+        intensity/beta scan history; see :meth:`_draw_profile` for the
+        load/render split."""
+        if not self.current_files:
+            return
+        if self.axes is None or self.current_plot_kind != 'scan_history':
+            self._set_mode_figure('scan_history')
+        files = self.current_files
+        if len(files) > _MAX_FILES_FOR_TIMESERIES:
+            files = _sample(files, _MAX_FILES_FOR_TIMESERIES)
         try:
-            bottom = float(self.height_bottom_var.get())
-            top = float(self.height_top_var.get())
-        except (TypeError, ValueError):
-            return None
-        return bottom, top
+            self._last_history = _data.load_scan_history(e.path for e in files)
+        except (IOError, ValueError) as exc:
+            self._show_message(f'Could not build history:\n{exc}')
+            return
+        self._render_history()
+        self.status_var.set(f'{len(files)} file(s) in the selected range.')
+
+    def _render_history(self) -> None:
+        """Redraw the scan history plot from :attr:`_last_history` and
+        the current axis limits, without touching disk."""
+        hist = self._last_history
+        if hist is None or self.axes is None:
+            return
+        ax_int, ax_beta, cax_int, cax_beta = self.axes
+        title = self.current_kind
+        if len(hist.times):
+            title = (f'{self.current_kind}  '
+                      f'{hist.times[0]:%Y-%m-%d %H:%M} – '
+                      f'{hist.times[-1]:%Y-%m-%d %H:%M}')
+        plotting.plot_scan_history(
+            ax_int, ax_beta, cax_int, cax_beta,
+            hist.times, hist.distance, hist.intensity, hist.beta,
+            distance_ylim=self._height_ylim, title=title)
+        self.canvas.draw_idle()
+        self._sync_height_fields_from_axes()
+
+    # ------------------------------------------------------------------
+    # drawing -- rhi_profile (RHI, Profile mode)
+    # ------------------------------------------------------------------
+
+    def _compute_rhi_profile_limits(self) -> None:
+        """Establish fixed distance/height/speed axis limits from a
+        sample of the current file selection, mirroring
+        :meth:`_compute_profile_limits`."""
+        sample = _sample(self.current_files, _MAX_FILES_FOR_LIMITS)
+        d_min, d_max = None, None
+        h_min, h_max = None, None
+        v_max = 1.0
+        for entry in sample:
+            try:
+                cross = _data.load_rhi_cross_section(entry.path)
+            except (IOError, ValueError):
+                continue
+            if cross.distance.size:
+                lo = float(np.nanmin(cross.distance))
+                hi = float(np.nanmax(cross.distance))
+                d_min = lo if d_min is None else min(d_min, lo)
+                d_max = hi if d_max is None else max(d_max, hi)
+            if cross.height.size:
+                lo = float(np.nanmin(cross.height))
+                hi = float(np.nanmax(cross.height))
+                h_min = lo if h_min is None else min(h_min, lo)
+                h_max = hi if h_max is None else max(h_max, hi)
+            if cross.velocity.size and np.any(np.isfinite(cross.velocity)):
+                v_max = max(v_max, float(np.nanmax(np.abs(cross.velocity))))
+
+        natural_distance = _pad_range(d_min, d_max, default=(0.0, 1000.0))
+        self._distance_xlim = self._resolve_range(self.distance_ctrl, natural_distance)
+
+        vmax_capped = min(v_max * 1.1, plotting.MAX_AUTOSCALE_SPEED)
+        natural_speed = (-vmax_capped, vmax_capped)
+        self._speed_range = self._resolve_range(self.speed_ctrl, natural_speed)
+
+        if self.height_ctrl.auto_var.get():
+            self._height_ylim = _pad_range(h_min, h_max) if h_min is not None else None
+
+    def _draw_rhi_profile(self) -> None:
+        """Load the current file and render it as a distance/height
+        cross section; see :meth:`_draw_profile` for the load/render
+        split."""
+        if not self.current_files:
+            return
+        if self.axes is None or self.current_plot_kind != 'rhi_profile':
+            self._set_mode_figure('rhi_profile')
+        entry = self.current_files[self.current_index]
+        try:
+            self._last_rhi = _data.load_rhi_cross_section(entry.path)
+        except (IOError, ValueError) as exc:
+            self._show_message(f'Could not read {entry.path.name}:\n{exc}')
+            return
+        self._render_rhi_profile()
+        self.status_var.set(
+            f'{entry.path.name}\n'
+            f'File {self.current_index + 1} of {len(self.current_files)}')
+
+    def _render_rhi_profile(self) -> None:
+        """Redraw the RHI cross section from :attr:`_last_rhi` and the
+        current axis limits, without touching disk."""
+        cross = self._last_rhi
+        if cross is None or self.axes is None:
+            return
+        ax_vel, ax_beta, cax_vel, cax_beta = self.axes
+        plotting.plot_rhi_cross_section(
+            ax_vel, ax_beta, cax_vel, cax_beta,
+            cross.distance, cross.height, cross.velocity, cross.beta,
+            distance_xlim=self._distance_xlim, height_ylim=self._height_ylim,
+            speed_vlim=self._speed_range,
+            title=f'{self.current_kind}  {cross.timestamp:%Y-%m-%d %H:%M:%S}')
+        self.canvas.draw_idle()
+        self._sync_height_fields_from_axes()
+
+    # ------------------------------------------------------------------
+    # Height range
+    # ------------------------------------------------------------------
 
     def _current_height_ylim(self):
         if self.axes is None:
@@ -804,82 +1198,93 @@ class WindLidarViewerApp:
         """In Auto mode, mirror the plot's actual (autoscaled) height
         limits into the -- disabled, display-only -- Bottom/Top fields,
         so they always show real numbers rather than stale ones."""
-        if not self.height_auto_var.get() or self.axes is None:
+        if not self.height_ctrl.auto_var.get() or self.axes is None:
             return
         lo, hi = self.axes[0].get_ylim()
-        self.height_bottom_var.set(f'{lo:.1f}')
-        self.height_top_var.set(f'{hi:.1f}')
+        self.height_ctrl.set_display_range(lo, hi)
 
     def _on_height_auto_toggle(self) -> None:
-        auto = self.height_auto_var.get()
-        state = 'disabled' if auto else 'normal'
-        for w in (self.height_bottom_entry, self.height_top_entry,
-                  self.height_bottom_up, self.height_bottom_down,
-                  self.height_top_up, self.height_top_down):
-            w.configure(state=state)
+        auto = self.height_ctrl.auto_var.get()
         if auto:
             self._height_ylim = None
             if self.current_files:
-                if self.current_mode == PROFILE_MODE:
+                if self.current_plot_kind == 'wind_profile':
                     self._compute_profile_limits()
-                    self._render_profile()
-                elif self.current_mode == TIMESERIES_MODE:
-                    self._render_timeseries()
+                elif self.current_plot_kind == 'rhi_profile':
+                    self._compute_rhi_profile_limits()
+                self._render_current()
         else:
             # seed the now-editable fields: bottom defaults to ground
             # level, top defaults to whatever Auto was just showing
-            self.height_bottom_var.set('0')
             lo, hi = self._current_height_ylim() or (0.0, 100.0)
-            self.height_top_var.set(f'{hi:.1f}')
+            self.height_ctrl.set_display_range(0.0, hi)
             self._redraw_height_range()
-
-    def _on_height_entry_change(self) -> None:
-        self._redraw_height_range()
-
-    def _step_height(self, which: str, direction: int) -> None:
-        """Step Bottom or Top by the current step size, snapping the
-        result to a multiple of that step size (0, step, 2*step, ...)
-        rather than just adding it to whatever fractional value is
-        currently shown -- so repeated stepping (and stepping after
-        Auto seeded a non-round value) always lands on round numbers,
-        the same "snap to a grid" rule the time-window Back/Forward
-        buttons use."""
-        rng = self._height_display_range()
-        if rng is None:
-            return
-        bottom, top = rng
-        step = _height_step_size(max(top - bottom, _HEIGHT_MIN_SPAN))
-        if which == 'bottom':
-            new_bottom = (round(bottom / step) + direction) * step
-            # refuse a step that would shrink the span below the
-            # minimum, rather than overshooting the other end to force
-            # it back to exactly the minimum -- growing the span (the
-            # other direction) is always allowed
-            if top - new_bottom >= _HEIGHT_MIN_SPAN:
-                bottom = new_bottom
-        else:
-            new_top = (round(top / step) + direction) * step
-            if new_top - bottom >= _HEIGHT_MIN_SPAN:
-                top = new_top
-        self.height_bottom_var.set(f'{bottom:.1f}')
-        self.height_top_var.set(f'{top:.1f}')
-        self._redraw_height_range()
 
     def _redraw_height_range(self) -> None:
         """Apply a manually-entered height range to the current plot.
-        Cheap: redraws from :attr:`_last_profile`/:attr:`_last_series`
-        (already in memory) rather than reloading from disk, so the
-        stepper buttons and typed edits feel immediate."""
-        if self.height_auto_var.get() or self.axes is None:
+        Cheap: redraws from the last-loaded data (already in memory)
+        rather than reloading from disk, so the stepper buttons and
+        typed edits feel immediate."""
+        if self.height_ctrl.auto_var.get() or self.axes is None:
             return
-        rng = self._height_display_range()
+        rng = self.height_ctrl.display_range()
         if rng is None or rng[1] <= rng[0]:
             return
         self._height_ylim = rng
-        if self.current_mode == PROFILE_MODE:
-            self._render_profile()
-        elif self.current_mode == TIMESERIES_MODE:
-            self._render_timeseries()
+        self._render_current()
+
+    # ------------------------------------------------------------------
+    # Distance range (RHI Profile only)
+    # ------------------------------------------------------------------
+
+    def _on_distance_auto_toggle(self) -> None:
+        auto = self.distance_ctrl.auto_var.get()
+        if auto:
+            if self.current_files and self.current_plot_kind == 'rhi_profile':
+                self._compute_rhi_profile_limits()
+                self._render_current()
+        else:
+            lo, hi = self._distance_xlim or (0.0, 1000.0)
+            self.distance_ctrl.set_display_range(lo, hi)
+            self._redraw_distance_range()
+
+    def _redraw_distance_range(self) -> None:
+        if self.distance_ctrl.auto_var.get() or self.axes is None:
+            return
+        rng = self.distance_ctrl.display_range()
+        if rng is None or rng[1] <= rng[0]:
+            return
+        self._distance_xlim = rng
+        self._render_current()
+
+    # ------------------------------------------------------------------
+    # Speed range (wind_profile, wind_timeseries, rhi_profile)
+    # ------------------------------------------------------------------
+
+    def _on_speed_auto_toggle(self) -> None:
+        auto = self.speed_ctrl.auto_var.get()
+        if auto:
+            if self.current_files:
+                if self.current_plot_kind == 'wind_profile':
+                    self._compute_profile_limits()
+                elif self.current_plot_kind == 'wind_timeseries':
+                    self._compute_series_speed_range()
+                elif self.current_plot_kind == 'rhi_profile':
+                    self._compute_rhi_profile_limits()
+                self._render_current()
+        else:
+            lo, hi = self._speed_range or (0.0, 25.0)
+            self.speed_ctrl.set_display_range(lo, hi)
+            self._redraw_speed_range()
+
+    def _redraw_speed_range(self) -> None:
+        if self.speed_ctrl.auto_var.get() or self.axes is None:
+            return
+        rng = self.speed_ctrl.display_range()
+        if rng is None or rng[1] <= rng[0]:
+            return
+        self._speed_range = rng
+        self._render_current()
 
 
 def main(argv=None) -> int:
