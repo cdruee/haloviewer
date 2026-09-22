@@ -75,16 +75,32 @@ height axis, each with its own ▲/▼ steppers alongside the field. With
 display the current autoscaled range; uncheck it to type your own
 bottom/top or use the steppers (step size scales with the current
 span: 2.5 m up to 5 m up to 10 m ... capped at 250 m for very tall
-views; the span can't be shrunk below 25 m). A manual height range is
-applied instantly, without re-reading any files, and persists across
-navigation and time-range changes until you switch Auto back on.
+views; the span can't be shrunk below 25 m). Each stepper click snaps
+the field to a round multiple of that step size (0, step, 2×step, ...)
+rather than just nudging whatever value is currently shown. A manual
+height range is applied instantly, without re-reading any files, and
+persists across navigation and time-range changes until you switch
+Auto back on.
 
 **Time.** The "Time" frame holds Start time, a row (wrapped over two
 lines) of quick-range radio buttons, and End time. The presets --
 Custom, Week, 2 days, 24h, 12h, 6h -- set Start time to End time minus
-that offset and immediately reload; Start time is editable only when
-Custom is selected. Changing End time while a preset other than Custom
-is active recomputes Start time from it.
+that offset (End time itself is left as-is) and immediately reload;
+Start time is editable only when Custom is selected. Changing End time
+while a preset other than Custom is active recomputes Start time from
+it.
+
+With a fixed-length preset active, **Browse files** changes meaning:
+instead of stepping through individual files, First/Back/Forward/Last
+move the whole [Start, End] window, and stay active in both Profile and
+Time series mode (under Custom they only step files, one at a time, and
+only in Profile mode, as before). First jumps the window to the true
+start of this kind's data; Last jumps it to the true end. Back/Forward
+shift the window by exactly one interval; the resulting End time is
+snapped to a grid of interval-length multiples anchored at the start of
+its year (e.g. with 24h selected, End always lands on a whole
+day-since-Jan-1 boundary), so repeated stepping can't drift off round
+numbers the way plain addition would.
 
 The plot's own zoom/pan tools (in the toolbar under it) work as usual;
 holding `x` or `y` while dragging the zoom-rectangle constrains it to

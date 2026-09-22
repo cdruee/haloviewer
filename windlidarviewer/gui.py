@@ -487,8 +487,7 @@ class WindLidarViewerApp:
         info = get_kind_info(self.current_kind) if self.current_kind else None
 
         if info is None or not info.modes:
-            for b in (self.btn_first, self.btn_back, self.btn_fwd, self.btn_last):
-                b.configure(state='disabled')
+            self._update_nav_state()
             if self.current_mode != PROFILE_MODE:
                 self._set_mode_figure(PROFILE_MODE)
             message = ('No plottable data selected.' if info is None else
@@ -498,9 +497,7 @@ class WindLidarViewerApp:
             self.status_var.set(message)
             return
 
-        nav_state = 'normal' if mode == PROFILE_MODE else 'disabled'
-        for b in (self.btn_first, self.btn_back, self.btn_fwd, self.btn_last):
-            b.configure(state=nav_state)
+        self._update_nav_state()
 
         if mode not in info.modes:
             mode = info.modes[0]
@@ -545,7 +542,14 @@ class WindLidarViewerApp:
 
     def _on_time_preset_change(self) -> None:
         self._apply_time_preset()
+        self._update_nav_state()
         self._apply_range()
+
+    def _interval_active(self) -> bool:
+        """True when a fixed-length preset (Week/2 days/24h/12h/6h) is
+        selected rather than Custom -- this is what switches the browse
+        buttons from per-file stepping to whole-window shifting."""
+        return self.time_preset_var.get() != 'custom'
 
     def _on_end_time_change(self) -> None:
         # End time is the anchor every non-custom preset is relative
@@ -583,21 +587,93 @@ class WindLidarViewerApp:
     # ------------------------------------------------------------------
     # navigation
     # ------------------------------------------------------------------
+    #
+    # Two distinct behaviours share the same four buttons, switched on
+    # by the active time preset:
+    #  - Custom: the original per-file browsing within the files that
+    #    "Apply range" already loaded (First/Last jump to the first/last
+    #    loaded file, Back/Forward step one file at a time).
+    #  - a fixed-length preset (Week/2 days/24h/12h/6h): the buttons
+    #    instead shift the whole [start, end] time *window* by one
+    #    interval and reload -- First/Last jump the window to the true
+    #    start/end of this kind's data, Back/Forward step the window by
+    #    exactly one interval, snapped to a year-start-anchored grid so
+    #    repeated stepping can't drift off round numbers.
+
+    def _update_nav_state(self) -> None:
+        info = get_kind_info(self.current_kind) if self.current_kind else None
+        if info is None or not info.modes:
+            state = 'disabled'
+        else:
+            state = ('normal' if (self._interval_active() or
+                                   self.mode_var.get() == PROFILE_MODE)
+                      else 'disabled')
+        for b in (self.btn_first, self.btn_back, self.btn_fwd, self.btn_last):
+            b.configure(state=state)
+
+    def _window_to_data_edge(self, which: str) -> None:
+        """First/Last under a fixed-length preset: align the window to
+        this kind's actual data start/end (not snapped to the interval
+        grid -- the data edge itself is the exact anchor requested)."""
+        delta = _TIME_PRESET_DELTAS.get(self.time_preset_var.get())
+        if delta is None or self.scan_result is None or not self.current_kind:
+            return
+        lo, hi = self.scan_result.time_range(self.current_kind)
+        if lo is None:
+            return
+        if which == 'start':
+            start, end = lo, lo + delta
+        else:
+            start, end = hi - delta, hi
+        self.start_var.set(start.strftime(_TIME_FMT))
+        self.end_var.set(end.strftime(_TIME_FMT))
+        self._apply_range()
+
+    def _step_time_window(self, direction: int) -> None:
+        """Back/Forward under a fixed-length preset: shift the window by
+        one interval. The new End time is snapped to the grid of
+        interval-length multiples anchored at the start of its year, so
+        stepping always lands on round numbers regardless of where the
+        window happened to start."""
+        delta = _TIME_PRESET_DELTAS.get(self.time_preset_var.get())
+        if delta is None:
+            return
+        end = self._parse_time(self.end_var.get())
+        if end is None:
+            return
+        anchor = pd.Timestamp(year=end.year, month=1, day=1)
+        k = round((end - anchor) / delta)
+        new_end = anchor + (k + direction) * delta
+        self.start_var.set((new_end - delta).strftime(_TIME_FMT))
+        self.end_var.set(new_end.strftime(_TIME_FMT))
+        self._apply_range()
 
     def _go_first(self) -> None:
+        if self._interval_active():
+            self._window_to_data_edge('start')
+            return
         self.current_index = 0
         self._draw_profile()
 
     def _go_back(self) -> None:
+        if self._interval_active():
+            self._step_time_window(-1)
+            return
         self.current_index = max(0, self.current_index - 1)
         self._draw_profile()
 
     def _go_forward(self) -> None:
+        if self._interval_active():
+            self._step_time_window(1)
+            return
         self.current_index = min(len(self.current_files) - 1,
                                   self.current_index + 1)
         self._draw_profile()
 
     def _go_last(self) -> None:
+        if self._interval_active():
+            self._window_to_data_edge('end')
+            return
         self.current_index = len(self.current_files) - 1
         self._draw_profile()
 
@@ -761,13 +837,20 @@ class WindLidarViewerApp:
         self._redraw_height_range()
 
     def _step_height(self, which: str, direction: int) -> None:
+        """Step Bottom or Top by the current step size, snapping the
+        result to a multiple of that step size (0, step, 2*step, ...)
+        rather than just adding it to whatever fractional value is
+        currently shown -- so repeated stepping (and stepping after
+        Auto seeded a non-round value) always lands on round numbers,
+        the same "snap to a grid" rule the time-window Back/Forward
+        buttons use."""
         rng = self._height_display_range()
         if rng is None:
             return
         bottom, top = rng
         step = _height_step_size(max(top - bottom, _HEIGHT_MIN_SPAN))
         if which == 'bottom':
-            new_bottom = bottom + direction * step
+            new_bottom = (round(bottom / step) + direction) * step
             # refuse a step that would shrink the span below the
             # minimum, rather than overshooting the other end to force
             # it back to exactly the minimum -- growing the span (the
@@ -775,7 +858,7 @@ class WindLidarViewerApp:
             if top - new_bottom >= _HEIGHT_MIN_SPAN:
                 bottom = new_bottom
         else:
-            new_top = top + direction * step
+            new_top = (round(top / step) + direction) * step
             if new_top - bottom >= _HEIGHT_MIN_SPAN:
                 top = new_top
         self.height_bottom_var.set(f'{bottom:.1f}')
