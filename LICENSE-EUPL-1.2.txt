@@ -1,0 +1,15 @@
+European Union Public Licence V. 1.2 (EUPL-1.2)
+
+The file windlidarviewer/hpl.py in this repository is adapted from
+the `hpl` module of the cdruee/python-readmet package
+(https://github.com/cdruee/python-readmet), which is distributed under
+the terms of the European Union Public Licence, Version 1.2 ("EUPL").
+
+The full licence text is available at:
+https://joinup.ec.europa.eu/collection/eupl/eupl-text-11-12
+
+and from the original project's LICENSE.txt at:
+https://github.com/cdruee/python-readmet/blob/master/LICENSE.txt
+
+Only windlidarviewer/hpl.py is covered by the EUPL; see LICENSE.txt
+at the project root for the licence covering the rest of this project.

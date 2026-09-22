@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "windlidarviewer"
+version = "0.1.0"
+description = "Viewer and plotting tools for Halo Photonics WindLidar data"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "Clemens" }
+]
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+windlidar-gui = "windlidarviewer.gui:main"
+windlidar-plot = "windlidarviewer.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["windlidarviewer*"]
