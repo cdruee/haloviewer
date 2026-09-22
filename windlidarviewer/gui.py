@@ -75,12 +75,16 @@ def _height_step_size(span: float) -> float:
 # the range; "custom" just hands Start time back to the user.
 _TIME_PRESETS = [
     ('custom', 'Custom', None),
-    ('week', 'Week before', pd.Timedelta(days=7)),
-    ('2days', '2 days before', pd.Timedelta(days=2)),
-    ('24h', '24h before', pd.Timedelta(hours=24)),
-    ('12h', '12h before', pd.Timedelta(hours=12)),
-    ('6h', '6h before', pd.Timedelta(hours=6)),
+    ('week', 'Week', pd.Timedelta(days=7)),
+    ('2days', '2 days', pd.Timedelta(days=2)),
+    ('24h', '24h', pd.Timedelta(hours=24)),
+    ('12h', '12h', pd.Timedelta(hours=12)),
+    ('6h', '6h', pd.Timedelta(hours=6)),
 ]
+# Number of columns the preset radio buttons wrap at -- 6 presets in 3
+# columns makes 2 short rows instead of one row too wide for the left
+# panel.
+_PRESET_COLUMNS = 3
 _TIME_PRESET_DELTAS = {key: delta for key, _label, delta in _TIME_PRESETS}
 
 
@@ -202,56 +206,64 @@ class WindLidarViewerApp:
         row += 1
 
         # -- height range ---------------------------------------------------
-        ttk.Label(parent, text='Height range (m)').grid(
-            row=row, column=0, sticky='w')
-        row += 1
-        height_frame = ttk.Frame(parent)
+        # Bottom and Top sit side by side, each as a label above one row
+        # of [entry][up][down] -- this keeps the control only as tall as
+        # a single entry/button row instead of stacking the up/down
+        # buttons above one another.
+        height_frame = ttk.LabelFrame(parent, text='Height')
         height_frame.grid(row=row, column=0, sticky='we', pady=(0, 8))
+        height_frame.columnconfigure(0, weight=1)
         height_frame.columnconfigure(1, weight=1)
+        row += 1
 
         self.height_bottom_var = tk.StringVar(value='0')
         self.height_top_var = tk.StringVar(value='')
 
-        ttk.Label(height_frame, text='Bottom').grid(row=0, column=0, sticky='w')
+        ttk.Label(height_frame, text='Bottom (m)').grid(
+            row=0, column=0, sticky='w', padx=(4, 2), pady=(2, 0))
+        ttk.Label(height_frame, text='Top (m)').grid(
+            row=0, column=1, sticky='w', padx=(2, 4), pady=(2, 0))
+
+        bottom_row = ttk.Frame(height_frame)
+        bottom_row.grid(row=1, column=0, sticky='we', padx=(4, 2))
+        bottom_row.columnconfigure(0, weight=1)
         self.height_bottom_entry = ttk.Entry(
-            height_frame, textvariable=self.height_bottom_var, width=8)
-        self.height_bottom_entry.grid(row=0, column=1, sticky='we', padx=(4, 2))
+            bottom_row, textvariable=self.height_bottom_var, width=7)
+        self.height_bottom_entry.grid(row=0, column=0, sticky='we')
         self.height_bottom_entry.bind(
             '<Return>', lambda e: self._on_height_entry_change())
-        bottom_steppers = ttk.Frame(height_frame)
-        bottom_steppers.grid(row=0, column=2)
         self.height_bottom_up = ttk.Button(
-            bottom_steppers, text='▲', width=2,
+            bottom_row, text='▲', width=2,
             command=lambda: self._step_height('bottom', 1))
+        self.height_bottom_up.grid(row=0, column=1)
         self.height_bottom_down = ttk.Button(
-            bottom_steppers, text='▼', width=2,
+            bottom_row, text='▼', width=2,
             command=lambda: self._step_height('bottom', -1))
-        self.height_bottom_up.grid(row=0, column=0)
-        self.height_bottom_down.grid(row=1, column=0)
+        self.height_bottom_down.grid(row=0, column=2)
 
-        ttk.Label(height_frame, text='Top').grid(row=1, column=0, sticky='w')
+        top_row = ttk.Frame(height_frame)
+        top_row.grid(row=1, column=1, sticky='we', padx=(2, 4))
+        top_row.columnconfigure(0, weight=1)
         self.height_top_entry = ttk.Entry(
-            height_frame, textvariable=self.height_top_var, width=8)
-        self.height_top_entry.grid(row=1, column=1, sticky='we', padx=(4, 2))
+            top_row, textvariable=self.height_top_var, width=7)
+        self.height_top_entry.grid(row=0, column=0, sticky='we')
         self.height_top_entry.bind(
             '<Return>', lambda e: self._on_height_entry_change())
-        top_steppers = ttk.Frame(height_frame)
-        top_steppers.grid(row=1, column=2)
         self.height_top_up = ttk.Button(
-            top_steppers, text='▲', width=2,
+            top_row, text='▲', width=2,
             command=lambda: self._step_height('top', 1))
+        self.height_top_up.grid(row=0, column=1)
         self.height_top_down = ttk.Button(
-            top_steppers, text='▼', width=2,
+            top_row, text='▼', width=2,
             command=lambda: self._step_height('top', -1))
-        self.height_top_up.grid(row=0, column=0)
-        self.height_top_down.grid(row=1, column=0)
+        self.height_top_down.grid(row=0, column=2)
 
         self.height_auto_var = tk.BooleanVar(value=True)
         self.height_auto_check = ttk.Checkbutton(
             height_frame, text='Auto', variable=self.height_auto_var,
             command=self._on_height_auto_toggle)
         self.height_auto_check.grid(
-            row=2, column=0, columnspan=3, sticky='w', pady=(2, 0))
+            row=2, column=0, columnspan=2, sticky='w', padx=4, pady=(2, 4))
         # Auto starts on, so the (not yet meaningful) manual controls
         # start disabled -- _on_height_auto_toggle sets this consistently
         # any time Auto is toggled, this just matches that at startup.
@@ -259,34 +271,50 @@ class WindLidarViewerApp:
                   self.height_bottom_up, self.height_bottom_down,
                   self.height_top_up, self.height_top_down):
             w.configure(state='disabled')
-        row += 1
 
-        # -- time range ---------------------------------------------------
-        ttk.Label(parent, text='Start time').grid(row=row, column=0, sticky='w')
+        # -- time range: Start time / quick presets / End time, all inside
+        # one "Time" frame. Apply range and the First/Back/Forward/Last
+        # browse buttons stay outside it. ------------------------------
+        time_frame = ttk.LabelFrame(parent, text='Time')
+        time_frame.grid(row=row, column=0, sticky='we', pady=(0, 8))
+        time_frame.columnconfigure(0, weight=1)
         row += 1
+        trow = 0
+
+        ttk.Label(time_frame, text='Start time').grid(
+            row=trow, column=0, sticky='w', padx=4, pady=(2, 0))
+        trow += 1
         self.start_var = tk.StringVar()
-        self.start_entry = ttk.Entry(parent, textvariable=self.start_var)
-        self.start_entry.grid(row=row, column=0, sticky='we')
+        self.start_entry = ttk.Entry(time_frame, textvariable=self.start_var)
+        self.start_entry.grid(row=trow, column=0, sticky='we', padx=4)
         self.start_entry.bind('<Return>', lambda e: self._apply_range())
-        row += 1
-        ttk.Label(parent, text='End time').grid(row=row, column=0, sticky='w')
-        row += 1
-        self.end_var = tk.StringVar()
-        end_entry = ttk.Entry(parent, textvariable=self.end_var)
-        end_entry.grid(row=row, column=0, sticky='we')
-        end_entry.bind('<Return>', lambda e: self._on_end_time_change())
-        row += 1
+        trow += 1
 
-        # -- quick range presets ----------------------------------------
+        # quick range presets -- wrapped at _PRESET_COLUMNS per row so
+        # they fit the narrow left panel in two short rows instead of
+        # one very wide one.
         self.time_preset_var = tk.StringVar(value='custom')
-        preset_frame = ttk.Frame(parent)
-        preset_frame.grid(row=row, column=0, sticky='w', pady=(2, 4))
-        for key, label, _delta in _TIME_PRESETS:
+        preset_frame = ttk.Frame(time_frame)
+        preset_frame.grid(row=trow, column=0, sticky='we', padx=2, pady=(4, 4))
+        for c in range(_PRESET_COLUMNS):
+            preset_frame.columnconfigure(c, weight=1)
+        for i, (key, label, _delta) in enumerate(_TIME_PRESETS):
             ttk.Radiobutton(
                 preset_frame, text=label, value=key,
                 variable=self.time_preset_var,
-                command=self._on_time_preset_change).pack(anchor='w')
-        row += 1
+                command=self._on_time_preset_change).grid(
+                row=i // _PRESET_COLUMNS, column=i % _PRESET_COLUMNS,
+                sticky='w')
+        trow += 1
+
+        ttk.Label(time_frame, text='End time').grid(
+            row=trow, column=0, sticky='w', padx=4)
+        trow += 1
+        self.end_var = tk.StringVar()
+        end_entry = ttk.Entry(time_frame, textvariable=self.end_var)
+        end_entry.grid(row=trow, column=0, sticky='we', padx=4, pady=(0, 4))
+        end_entry.bind('<Return>', lambda e: self._on_end_time_change())
+        trow += 1
 
         ttk.Button(parent, text='Apply range',
                    command=self._apply_range).grid(

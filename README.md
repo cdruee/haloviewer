@@ -69,21 +69,22 @@ any directory below it (e.g. a single year, month, or day); the tree is
 rescanned whenever a new directory is picked or typed in and confirmed
 with Enter.
 
-**Height range.** Bottom/Top fields control the shared height axis.
-With **Auto** checked (the default) they're read-only and just display
-the current autoscaled range; uncheck it to type your own bottom/top or
-use the ▲/▼ steppers next to each field (step size scales with the
-current span: 2.5 m up to 5 m up to 10 m ... capped at 250 m for very
-tall views; the span can't be shrunk below 25 m). A manual height range
-is applied instantly, without re-reading any files, and persists across
+**Height.** The "Height" frame's Bottom/Top fields control the shared
+height axis, each with its own ▲/▼ steppers alongside the field. With
+**Auto** checked (the default) the fields are read-only and just
+display the current autoscaled range; uncheck it to type your own
+bottom/top or use the steppers (step size scales with the current
+span: 2.5 m up to 5 m up to 10 m ... capped at 250 m for very tall
+views; the span can't be shrunk below 25 m). A manual height range is
+applied instantly, without re-reading any files, and persists across
 navigation and time-range changes until you switch Auto back on.
 
-**Time range presets.** The radio buttons between End time and Apply
-range (Custom, Week before, 2 days before, 24h before, 12h before, 6h
-before) set Start time to End time minus that offset and immediately
-reload -- Start time is editable only when Custom is selected. Changing
-End time while a preset other than Custom is active recomputes Start
-time from it.
+**Time.** The "Time" frame holds Start time, a row (wrapped over two
+lines) of quick-range radio buttons, and End time. The presets --
+Custom, Week, 2 days, 24h, 12h, 6h -- set Start time to End time minus
+that offset and immediately reload; Start time is editable only when
+Custom is selected. Changing End time while a preset other than Custom
+is active recomputes Start time from it.
 
 The plot's own zoom/pan tools (in the toolbar under it) work as usual;
 holding `x` or `y` while dragging the zoom-rectangle constrains it to
