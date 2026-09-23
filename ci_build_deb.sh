@@ -13,6 +13,21 @@ fi
 
 FULLNAME=${BUILD_VERSION%.tar.gz}
 VERSION=${FULLNAME##*-}
+
+# Python (PEP 440) pre-release and dev versions must sort *before* the
+# final release in Debian too. Debian only does that for "~", so turn
+#   0.2.0rc2 -> 0.2.0~rc2,  0.2.0a1 -> 0.2.0~a1,  0.2.0b3 -> 0.2.0~b3,
+#   0.2.1.dev3+g1a2b3c -> 0.2.1~dev3+g1a2b3c
+# Only the public part (before "+") is touched, so letters inside a
+# setuptools-scm local version such as "+g1a2b3c" stay unchanged.
+PUBLIC_VERSION=${VERSION%%+*}
+LOCAL_VERSION=${VERSION#"$PUBLIC_VERSION"}
+PUBLIC_VERSION=$( echo "$PUBLIC_VERSION" \
+  | sed -E -e 's/[.-]?(alpha|beta|rc|pre|preview|a|b|c)([0-9]*)/~\1\2/g' \
+           -e 's/[.-]?dev([0-9]*)/~~dev\1/g' )
+# ("~~dev": PEP 440 puts .devN before aN/bN/rcN; "~~" sorts before "~".)
+DEB_VERSION="${PUBLIC_VERSION}${LOCAL_VERSION}"
+echo "Python version: $VERSION -> Debian upstream version: $DEB_VERSION"
 NAME=${FULLNAME%%-*}
 CODENAME=$(cat /etc/os-release | grep VERSION_CODENAME | sed s/.*=// | tr -d '"')
 
@@ -89,7 +104,7 @@ fi
 echo "Using licence file: $LICENSE_FILE"
 
 export DEBFULLNAME="$AUTHOR"
-dh_make --python -p ${NAME}_${VERSION}+1${CODENAME}1 \
+dh_make --python -p ${NAME}_${DEB_VERSION}+1${CODENAME}1 \
   -f ../${FULLNAME}.tar.gz \
   -c custom \
   --copyrightfile "$LICENSE_FILE" \
@@ -202,6 +217,18 @@ sed -i 's/Build-Architecture: .*/Build-Architecture: armhf/' ../*.buildinfo
 EOF
   chmod +x ~/tmp.sh
   ARCH_OPTS=--hook-changes=~/tmp.sh
+fi
+
+# Install every Build-Depends of the generated debian/control, so the
+# build does not rely on the CI job having apt-installed the right list
+# (dpkg-checkbuilddeps would otherwise abort on anything missing, e.g.
+# pybuild-plugin-pyproject). Needs root, which the CI containers have.
+if [ "$(id -u)" = "0" ]; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq || true
+  apt-get -y --no-install-recommends build-dep ./
+else
+  echo "WARNING: not root, cannot install build dependencies" >&2
 fi
 
 # Disable tests during package build (they may need special setup)
