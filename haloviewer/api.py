@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import glob as _glob
 import math
+import os
 import re
 import warnings
 from pathlib import Path
@@ -38,7 +39,11 @@ from typing import Iterable, List, Optional, Sequence, Tuple, Union
 
 import matplotlib as mpl
 import pandas as pd
-from matplotlib.figure import Figure
+if os.environ.get('BUILDING_SPHINX', 'false') == 'false':
+    import matplotlib.dates as mdates
+    from matplotlib.figure import Figure
+else:
+    Figure = None
 
 from . import data as _data
 from . import plotting

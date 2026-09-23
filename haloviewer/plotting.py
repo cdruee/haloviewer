@@ -42,11 +42,15 @@ Colour choices:
 
 from __future__ import annotations
 
+import os
 from typing import Optional, Sequence, Tuple
 
-import matplotlib.dates as mdates
 import numpy as np
-from matplotlib.figure import Figure
+if os.environ.get('BUILDING_SPHINX', 'false') == 'false':
+    import matplotlib.dates as mdates
+    from matplotlib.figure import Figure
+else:
+    mdates = Figure = None
 
 __all__ = [
     'SPEED_CMAP', 'DIRECTION_CMAP', 'INTENSITY_CMAP', 'BETA_CMAP',
