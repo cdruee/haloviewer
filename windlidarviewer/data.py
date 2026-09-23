@@ -7,6 +7,7 @@ knowing about the other's concerns (file format vs. rendering).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
@@ -15,6 +16,8 @@ import numpy as np
 import pandas as pd
 
 from . import hpl
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     'ProfileData', 'ProfileSeriesData',
@@ -146,12 +149,23 @@ def load_profile_series(paths: Iterable) -> ProfileSeriesData:
     where the data already line up, and removes that artifact where it
     doesn't.
 
+    A file that fails to load (corrupt, truncated, or -- unexpectedly --
+    not actually a Processed Wind Profile file) is skipped with a
+    logged warning rather than aborting the whole series, so one bad
+    file out of many doesn't blank the whole plot.
+
     :param paths: iterable of file paths.
-    :raises ValueError: if ``paths`` is empty.
+    :raises ValueError: if ``paths`` is empty, or none of them could \
+        be loaded.
     """
-    profiles: List[ProfileData] = [load_profile(p) for p in paths]
+    profiles: List[ProfileData] = []
+    for p in paths:
+        try:
+            profiles.append(load_profile(p))
+        except (IOError, ValueError) as exc:
+            logger.warning('skipping %s: %s', p, exc)
     if not profiles:
-        raise ValueError('no files given to build a profile series from')
+        raise ValueError('no files could be loaded to build a profile series from')
     profiles.sort(key=lambda p: p.timestamp)
 
     height = _canonical_height_grid(profiles)
@@ -302,10 +316,22 @@ def load_scan_history(paths: Iterable) -> ScanHistoryData:
     layer then leaves the corresponding pixels empty (background)
     rather than interpolating across the gap.
 
+    A file that fails to load (corrupt, truncated beyond what
+    :meth:`hpl.DataFile._get_datablock`'s own truncation handling can
+    recover, or not actually a regular scan file) is skipped with a
+    logged warning rather than aborting the whole history, so one bad
+    file among many doesn't blank the whole plot.
+
     :param paths: iterable of file paths (regular scan ``.hpl`` files).
-    :raises ValueError: if none of the files contain any ray data.
+    :raises ValueError: if none of the files could be loaded, or none \
+        of the ones that did contain any ray data.
     """
-    files = [hpl.DataFile(str(p)) for p in paths]
+    files = []
+    for p in paths:
+        try:
+            files.append(hpl.DataFile(str(p)))
+        except (IOError, ValueError) as exc:
+            logger.warning('skipping %s: %s', p, exc)
     files = [f for f in files if f.rays]
     if not files:
         raise ValueError('no scan (ray) data found in the given files')

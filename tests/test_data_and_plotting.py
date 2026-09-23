@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 import matplotlib
 matplotlib.use("Agg")
 
@@ -12,6 +13,10 @@ from windlidarviewer.scan import scan_directory
 _DATA_DIR = Path(__file__).parent / "data"
 _RHI_FILE = _DATA_DIR / "RHI_77_20260921_000812.hpl"
 _VAD_FILE = _DATA_DIR / "VAD_77_20260921_000721.hpl"
+# header claims 6 rays; file is cut off partway through the 6th
+_VAD_TRUNCATED_FILE = _DATA_DIR / "VAD_77_20260921_000721_truncated.hpl"
+# header claims 6 rays; no ray data at all follows the marker line
+_VAD_EMPTY_FILE = _DATA_DIR / "VAD_77_20260921_000721_empty.hpl"
 
 
 def test_load_profile(proc_tree):
@@ -22,6 +27,17 @@ def test_load_profile(proc_tree):
     assert len(prof.speed) == 5
     assert len(prof.direction) == 5
     assert prof.timestamp == files[0].timestamp
+
+
+def test_load_profile_series_skips_a_bad_file(proc_tree):
+    # a file of the wrong kind (a regular scan, not a headerless
+    # Processed Wind Profile) mixed into the selection must be skipped
+    # with a warning, not abort the whole series
+    result = scan_directory(proc_tree)
+    paths = [e.path for e in result.files("Processed_Wind_Profile")]
+    paths.append(_VAD_FILE)
+    series = data.load_profile_series(paths)
+    assert len(series.times) == 3  # the 3 good files, not 4
 
 
 def test_load_profile_series(proc_tree):
@@ -235,3 +251,39 @@ def test_plot_rhi_cross_section_speed_vlim_is_symmetric_by_default():
                                      cross.velocity, cross.beta)
     vmin, vmax = ax_vel.collections[0].get_clim()
     assert vmin == -vmax
+
+
+# =========================================================================
+# Truncated/corrupt files: a scan that was still being written, or
+# aborted early, leaves a header ray count higher than what's actually
+# in the file. This used to crash with a raw IndexError deep inside the
+# parser instead of being reported (or skipped) cleanly -- see
+# hpl.DataFile._get_datablock and data.load_scan_history/
+# load_profile_series's per-file skip-on-failure behaviour.
+# =========================================================================
+
+def test_truncated_file_reads_only_its_complete_rays():
+    f = hpl.DataFile(str(_VAD_TRUNCATED_FILE))
+    # header still claims 6 rays; only 5 are actually complete
+    assert int(float(f.header["rays"])) == 6
+    assert len(f.rays) == 5
+
+
+def test_file_with_no_ray_data_parses_to_zero_rays_not_a_crash():
+    f = hpl.DataFile(str(_VAD_EMPTY_FILE))
+    assert len(f.rays) == 0
+
+
+def test_load_scan_history_skips_bad_files_among_good_ones():
+    # a good file + a truncated file (partial data) + an empty file
+    # (no ray data at all) -- the history should still build from
+    # whatever real ray data is available, not raise
+    hist = data.load_scan_history(
+        [_VAD_FILE, _VAD_TRUNCATED_FILE, _VAD_EMPTY_FILE])
+    assert hist.times.size > 0
+    assert hist.distance.size == 20
+
+
+def test_load_scan_history_raises_when_every_file_is_unusable():
+    with pytest.raises(ValueError):
+        data.load_scan_history([_VAD_EMPTY_FILE])

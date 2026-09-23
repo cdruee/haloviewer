@@ -297,6 +297,9 @@ class DataFile(object):
         # ensure lines is list of strings
         if isinstance(lines, str):
             lines = lines.split('\n')
+        if not lines:
+            raise IOError(
+                f'ray block is empty in {self.file} (file truncated?)')
         # ensure we have number of gates
         if not gates:
             gates = int(float(self.header['gates']))
@@ -342,6 +345,16 @@ class DataFile(object):
         Parse the whole data block of a regular scan file into
         :attr:`rays`, one :class:`Ray` per recorded ray.
 
+        The header's own ``No. of rays in file`` is only trusted up to
+        how many complete ray blocks (``Data line 1`` row + one row per
+        gate) are actually present in the file: a scan that was still
+        being written, or aborted early, ends up with a header count
+        higher than what's really there, and the trailing, incomplete
+        block would otherwise crash the parser outright (an ``IndexError``
+        from indexing into an empty slice of lines) instead of just
+        reading the rays that *are* complete. Only the shortfall is
+        dropped -- every complete ray up to that point is still read.
+
         :returns: list of :class:`Ray` objects, in file order.
         """
         # fast forward to data:
@@ -354,10 +367,20 @@ class DataFile(object):
             raise IOError('data block not found in file')
         nrays = int(float(self.header['rays']))
         ngates = int(float(self.header['gates']))
+        block = ngates + 1
+        available_rays = max(0, (len(self.text) - data_start) // block)
+        if available_rays < nrays:
+            logger.warning(
+                '%s: header declares %d ray(s) but only %d complete '
+                'ray block(s) (%d gates each) are present -- the file '
+                'looks truncated; reading only the %d complete ray(s) '
+                'found.', self.file, nrays, available_rays, ngates,
+                available_rays)
+            nrays = available_rays
         rays = []
         for n in range(nrays):
-            ray_start = data_start + n * (ngates + 1)
-            ray_end = data_start + (n + 1) * (ngates + 1)
+            ray_start = data_start + n * block
+            ray_end = data_start + (n + 1) * block
             ray = self._read_ray(self.text[ray_start:ray_end],
                                   gates=ngates,
                                   variables_1=self.header['variables_1'],
