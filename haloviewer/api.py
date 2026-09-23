@@ -37,13 +37,13 @@ import warnings
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple, Union
 
-import matplotlib as mpl
 import pandas as pd
 if os.environ.get('BUILDING_SPHINX', 'false') == 'false':
+    import matplotlib as mpl
     import matplotlib.dates as mdates
     from matplotlib.figure import Figure
 else:
-    Figure = None
+    mpl = mdates = Figure = None
 
 from . import data as _data
 from . import plotting
