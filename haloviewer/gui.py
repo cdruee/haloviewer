@@ -818,11 +818,12 @@ class HaloViewerApp:
     # ------------------------------------------------------------------
     #
     # Two distinct behaviours share the same four buttons, switched on
-    # by the active time preset:
-    #  - Custom: the original per-file browsing within the files that
-    #    "Apply range" already loaded (First/Last jump to the first/last
-    #    loaded file, Back/Forward step one file at a time).
-    #  - a fixed-length preset (Week/2 days/24h/12h/6h): the buttons
+    # by the plot kind and the active time preset (_nav_shifts_window):
+    #  - Profile mode (wind_profile, rhi_profile), or Custom: per-file
+    #    browsing within the files that "Apply range" already loaded
+    #    (First/Last jump to the first/last loaded file, Back/Forward
+    #    step one file at a time).
+    #  - History mode with a fixed-length preset (Week/2 days/24h/12h/6h): the buttons
     #    instead shift the whole [start, end] time *window* by one
     #    interval and reload -- First/Last jump the window to the true
     #    start/end of this kind's data, Back/Forward step the window by
@@ -877,31 +878,49 @@ class HaloViewerApp:
         self.end_var.set(new_end.strftime(_TIME_FMT))
         self._apply_range()
 
+    def _nav_shifts_window(self) -> bool:
+        """True when the browse buttons should shift the whole time
+        window rather than step through individual files: only for the
+        History plots (which show the whole window at once) under a
+        fixed-length preset. The per-file Profile plots (wind_profile,
+        rhi_profile) always step file by file within the loaded window,
+        whatever preset is active."""
+        return (self._interval_active() and
+                self._plot_kind() not in ('wind_profile', 'rhi_profile'))
+
     def _go_first(self) -> None:
-        if self._interval_active():
+        if self._nav_shifts_window():
             self._window_to_data_edge('start')
+            return
+        if not self.current_files:
             return
         self.current_index = 0
         self._draw_current()
 
     def _go_back(self) -> None:
-        if self._interval_active():
+        if self._nav_shifts_window():
             self._step_time_window(-1)
+            return
+        if not self.current_files:
             return
         self.current_index = max(0, self.current_index - 1)
         self._draw_current()
 
     def _go_forward(self) -> None:
-        if self._interval_active():
+        if self._nav_shifts_window():
             self._step_time_window(1)
+            return
+        if not self.current_files:
             return
         self.current_index = min(len(self.current_files) - 1,
                                   self.current_index + 1)
         self._draw_current()
 
     def _go_last(self) -> None:
-        if self._interval_active():
+        if self._nav_shifts_window():
             self._window_to_data_edge('end')
+            return
+        if not self.current_files:
             return
         self.current_index = len(self.current_files) - 1
         self._draw_current()

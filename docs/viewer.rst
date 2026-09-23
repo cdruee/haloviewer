@@ -138,19 +138,22 @@ Browsing files and time windows
 -------------------------------
 
 The **First/Back/Forward/Last** buttons have two meanings, depending on
-the active time preset.
+the plot mode and the active time preset.
 
-With a fixed-length preset active, **Browse files** changes meaning:
-instead of stepping through individual files, First/Back/Forward/Last
-move the whole [Start, End] window, and stay active in both Profile and
-History mode (under Custom they only step files, one at a time, and
-only in Profile mode, as before). First jumps the window to the true
-start of this kind's data; Last jumps it to the true end. Back/Forward
-shift the window by exactly one interval; the resulting End time is
-snapped to a grid of interval-length multiples anchored at the start of
-its year (e.g. with 24h selected, End always lands on a whole
-day-since-Jan-1 boundary), so repeated stepping can't drift off round
-numbers the way plain addition would.
+In **Profile** mode (Processed Wind Profile and RHI) they always step
+through the individual files loaded for the current [Start, End]
+window, one at a time, whatever preset is selected: First/Last jump to
+the first/last file, Back/Forward move one file.
+
+In **History** mode, with a fixed-length preset active, they instead
+move the whole [Start, End] window (under Custom they are disabled in
+History mode, since the whole selection is already on screen). First
+jumps the window to the true start of this kind's data; Last jumps it
+to the true end. Back/Forward shift the window by exactly one interval;
+the resulting End time is snapped to a grid of interval-length
+multiples anchored at the start of its year (e.g. with 24h selected,
+End always lands on a whole day-since-Jan-1 boundary), so repeated
+stepping can't drift off round numbers the way plain addition would.
 
 Zooming and panning
 -------------------
