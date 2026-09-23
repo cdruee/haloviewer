@@ -1,0 +1,387 @@
+workflow:
+  # Run if tag starts v0.00.00 indicating a release
+  #     or pipeline ist started manually in gitlab
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+.*/
+    - if: $CI_PIPELINE_SOURCE == "web" || $CI_JOB_MANUAL == "true"
+
+variables:
+  GIT_DEPTH: 0  # Global for setuptools_scm
+
+stages:
+  - test
+  - build
+  - release
+
+cache:
+  paths:
+    - .cache/pip
+
+# Test stage - run on tags only
+test_latest:
+  image: ubuntu:latest
+  stage: test
+  before_script:
+    - apt-get update && apt-get install -y git python3-pip
+    # Install system dependencies for GDAL
+    - apt-get install -y gdal-bin libgdal-dev
+    - apt-get install -y python3-build python3-setuptools-scm python3-gdal
+    - export GDAL_CONFIG=/usr/bin/gdal-config  # Help pip find GDAL
+    # Ensure git tags are available for setuptools_scm
+    - git fetch --tags
+    # Install package with test dependencies
+    - pip install --break-system-packages -e .
+  script:
+    - |
+      PKG_NAME=$(python3 -c "
+      import tomllib
+      with open('pyproject.toml', 'rb') as f:
+          data = tomllib.load(f)
+      print(data.get('project', {}).get('name', ''))
+      ")
+      if [ -z "$PKG_NAME" ]; then
+        echo "ERROR: could not determine package name from pyproject.toml" >&2
+        exit 1
+      fi
+      echo "Package name: $PKG_NAME"
+      export PKG_NAME
+    - echo "Running compile test..."
+    - python3 -m py_compile ${PKG_NAME}/*.py
+    - echo "Running flake8 style check..."
+    - flake8 ${PKG_NAME} --max-line-length=88 --ignore=E501,W503 || true
+    - echo "Running tests..."
+    - python3 -m pytest tests/ -v || true
+  rules:
+    - if: '$CI_COMMIT_TAG'
+
+build_sdist:
+  image: python:latest
+  stage: build
+  before_script:
+    - git fetch --tags  # Ensure tags are available
+    - pip install build setuptools setuptools-scm wheel
+  script:
+    - python -m setuptools_scm  # This will show what version setuptools-scm detects
+    - git describe --tags --dirty  # Show current git state
+    - python -m build -n --sdist
+    - echo 'ls dist/*tar.gz'
+    - ls dist/*tar.gz
+    - echo 'cd dist && ls *tar.gz'
+    - echo "$( cd dist && ls *tar.gz )"
+    - echo "BUILD_VERSION=$( cd dist && ls *tar.gz )" >> build.env
+    - echo "BUILD_JOB=${CI_JOB_ID}" >> build.env
+  artifacts:
+    paths:
+      - dist
+    reports:
+      dotenv: build.env
+
+build_pages:
+  image: python:latest
+  stage: build
+  rules:
+    - exists:
+      - docs/conf.py
+  needs:
+    - job: build_sdist
+      artifacts: true
+  before_script:
+    - git fetch --tags
+  script:
+    - pip install build setuptools_scm
+    - pip install sphinx sphinx-argparse sphinx-rtd-theme myst-parser numpy pandas
+    - pip install --no-deps -e .  # Install package so docs can import it
+    - BUILDING_SPHINX=true sphinx-build -b html docs build/sphinx/html
+    - mv build/sphinx/html/ public/
+  artifacts:
+    paths:
+      - public
+
+build_deb:
+  stage: build
+  image: $PUBLISHER:$DISTRIB
+  rules:
+    # "exists" matches file paths, not directory names, so this has to
+    # point at an actual file inside debian/ -- a bare "debian" never
+    # matches, since there is no file literally named "debian".
+    - exists:
+      - debian/control
+  needs:
+    - job: build_sdist
+      artifacts: true
+    - job: test_latest
+  script:
+    - export DEBIAN_FRONTEND=noninteractive
+    - apt update
+    - apt-get -y install gawk dh-python debhelper dh-make
+    - apt-get -y install python3-all
+    - apt-get -y install python3-numpy python3-pandas
+    - apt-get -y install python3-setuptools python3-stdeb
+    - apt-get -y install python3-setuptools-scm python3-build
+    - apt-get -y install gpg
+    - bash -x ./ci_build_deb.sh $BUILD_VERSION
+    - echo "DEB_${DISTRIB^^}_VERSION=$( cd deb_dist/$DISTRIB && ls *deb )" | tee -a  build.env
+    - echo "DEB_${DISTRIB^^}_JOB=${CI_JOB_ID}" | tee -a build.env
+    - echo "DEB_${DISTRIB^^}_VENDOR=${PUBLISHER}" | tee -a build.env
+    - cat build.env
+  artifacts:
+    paths:
+      - deb_dist
+    reports:
+      dotenv: build.env
+  parallel:
+    matrix:
+      - PUBLISHER: ubuntu
+        DISTRIB:
+          - noble
+          - resolute
+      - PUBLISHER: debian
+        DISTRIB:
+          - bookworm
+          - trixie
+
+release_pages:
+  image: python:latest
+  stage: release
+  # deploy only if a release (no ".devX" or "+"in version string):
+  rules:
+    - if: $CI_COMMIT_TAG && $CI_COMMIT_TAG !~ /(\.dev|\+)/
+      exists:
+        - docs/conf.py
+  needs:
+    - job: build_pages
+      artifacts: true
+    - job: build_deb
+      optional: true
+  script:
+    - touch public
+  pages: true
+  artifacts:
+    paths:
+    - public
+
+
+release_pypi:
+  image: python:latest
+  stage: release
+  rules:
+    # Release
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+      when: on_success
+  needs:
+    - job: build_deb
+      optional: true
+    - job: build_sdist
+      artifacts: true
+  script:
+    - pip install twine
+    - twine check dist/*tar.gz
+    - |
+      PKG_NAME=$(python3 -c "
+      import tomllib
+      with open('pyproject.toml', 'rb') as f:
+          data = tomllib.load(f)
+      print(data.get('project', {}).get('name', ''))
+      ")
+      if [ -z "$PKG_NAME" ]; then
+        echo "ERROR: could not determine package name from pyproject.toml" >&2
+        exit 1
+      fi
+      echo "Package name: $PKG_NAME"
+      # Version comes from the already-built sdist filename, not
+      # pyproject.toml, since setuptools_scm makes the version dynamic
+      # (no static "version" field to read there).
+      SDIST=$(ls dist/${PKG_NAME}-*.tar.gz | head -n1)
+      VERSION=$(basename "$SDIST" .tar.gz | sed "s/^${PKG_NAME}-//")
+      if [ -z "$VERSION" ]; then
+        echo "ERROR: could not determine version from sdist filename" >&2
+        exit 1
+      fi
+      echo "Version: $VERSION"
+      HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/${PKG_NAME}/${VERSION}/json")
+      if [ "$HTTP_CODE" = "200" ]; then
+        echo "Version ${VERSION} of ${PKG_NAME} is already on PyPI, skipping upload."
+      else
+        twine upload --repository-url https://upload.pypi.org/legacy/ --username __token__ --password $PYPI_ID_TOKEN dist/*tar.gz
+      fi
+
+test_pypi:
+  image: python:latest
+  stage: release
+  rules:
+    # Pre-releases: v1.2.3a1, v1.2.3-alpha1, v1.2.3b2, v1.2.3-beta2, v1.2.3rc3, v1.2.3-rc3
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+(-(alpha|beta|rc|a|b)\d+|a\d+|b\d+|rc\d+)$/'
+      when: on_success
+  needs:
+    - job: build_deb
+      optional: true
+    - job: build_sdist
+      artifacts: true
+  script:
+    - pip install twine
+    - twine check dist/*tar.gz
+    - twine upload --repository-url https://test.pypi.org/legacy/ --username __token__ --password $TEST_PYPI_ID_TOKEN dist/*tar.gz
+
+gitlab-release:
+  image: ubuntu:latest
+  stage: release
+  rules:
+    # Release
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+      when: on_success
+    # Pre-releases: v1.2.3a1, v1.2.3-alpha1, v1.2.3b2, v1.2.3-beta2, v1.2.3rc3, v1.2.3-rc3
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+(-(alpha|beta|rc|a|b)\d+|a\d+|b\d+|rc\d+)$/ && $CI_COMMIT_TAG !~ /dev/'
+      when: on_success
+  needs:
+    - job: build_sdist
+      artifacts: true
+    - job: build_deb
+      artifacts: true
+      optional: true
+    - job: test_latest
+  before_script:
+    - echo "Running the release job."
+    - apt update
+    - apt -y install curl jq
+    - curl --location --output /usr/local/bin/release-cli "https://gitlab.com/api/v4/projects/gitlab-org%2Frelease-cli/packages/generic/release-cli/latest/release-cli-linux-amd64"
+    - chmod +x /usr/local/bin/release-cli
+  script:
+    - echo "Running the release job."
+    - export SDIST_NAME="Python install package - ${BUILD_VERSION}"
+    - echo SDIST_NAME $SDIST_NAME
+    - 'export SDIST_URL=${CI_PROJECT_URL}/-/jobs/${BUILD_JOB}/artifacts/raw/dist/${BUILD_VERSION}'
+    - echo SDIST_URL $SDIST_URL
+    - export ASSET_ARGS='[{"name":"'$SDIST_NAME'","url":"'$SDIST_URL'"}'
+    - echo ASSET_ARGS $ASSET_ARGS
+    # this part only runs if deb_dist has run AND produced packages
+    - DISTRIBUTIONS=$([ -d deb_dist ] && ls deb_dist | tr "\n" " " || echo "")
+    - |
+      for DISTRIB in $DISTRIBUTIONS; do
+        echo distrib $DISTRIB
+        echo DISTRIB ${DISTRIB^^}
+        VERNAM=DEB_${DISTRIB^^}_VERSION
+        echo VERNAM $VERNAM
+        JOBNAM=DEB_${DISTRIB^^}_JOB
+        echo JOBNAM $JOBNAM
+        name="binary install package for $DISTRIB - ${!VERNAM}"
+        echo name $name
+        url="${CI_PROJECT_URL}/-/jobs/${!JOBNAM}/artifacts/raw/deb_dist/${DISTRIB}/${!VERNAM}"
+        echo url $url
+        asset_info='{"name":"'$name'","url":"'$url'"}'
+        echo asset_info $asset_info
+        ASSET_ARGS="$ASSET_ARGS, $asset_info"
+      done
+      ASSET_ARGS=$ASSET_ARGS']'
+    - echo "..."
+    - 'jq . <<< $ASSET_ARGS'
+    - echo "..."
+    - if [[ "$CI_COMMIT_TAG" == "" ]]; then echo "CI_COMMIT_TAG is empty"; exit 0; fi
+    - echo "..."
+    - 'echo release-cli create --name "$CI_COMMIT_TAG" --tag-name "$CI_COMMIT_TAG" --description "$CI_COMMIT_MESSAGE" --ref "$CI_COMMIT_TAG" --assets-link "$( jq -c . <<< $ASSET_ARGS )"'
+    - 'release-cli create --name "$CI_COMMIT_TAG" --tag-name "$CI_COMMIT_TAG" --description "$CI_COMMIT_MESSAGE" --ref "$CI_COMMIT_TAG" --assets-link "$( jq -c . <<< $ASSET_ARGS )"'
+
+merge_github:
+  stage: release
+  image: alpine
+  dependencies: []  # don't download artifacts from other jobs
+  rules:
+    # Release
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+  before_script:
+    - apk add --update git
+  script:
+    - git config --global user.email "$GITLAB_USER_EMAIL"
+    - git config --global user.name "$GITLAB_USER_NAME"
+    - git remote set-url origin "https://ci_access_token:$CI_ACCESS_TOKEN@$CI_SERVER_HOST/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME.git"
+    - git fetch origin github main --tags
+    # Checkout github branch
+    - git checkout github 2>/dev/null || git checkout -b github origin/github
+    # Squash merge main into github
+    - git merge --squash origin/main -X theirs --allow-unrelated-histories 2>&1 | tee git.out || true
+    # Exit gracefully if nothing new
+    - if grep -q "Already up to date" git.out; then echo "Nothing to merge"; exit 0; fi
+    # Resolve any remaining conflicts by taking version from main
+    - git diff --name-only --diff-filter=U | xargs -r git checkout origin/main --
+    # Stage all changes and commit
+    - git add -A
+    - git diff-index --quiet --cached HEAD || git commit -m "Squash merge main into github ($CI_COMMIT_TAG)"
+    - git push origin github
+    # Push tag to github branch
+    - if [ -n "$CI_COMMIT_TAG" ]; then git push origin $CI_COMMIT_TAG; fi
+
+release_deb:
+  image: ubuntu:latest
+  stage: release
+  rules:
+    # Release
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+      when: on_success
+  needs:
+    - job: build_sdist
+      artifacts: true
+    - job: build_deb
+      artifacts: true
+  before_script:
+    - 'command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client -y )'
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - cp $SSH_PRIVATE_KEY ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - eval $(ssh-agent -s)
+    - ssh-add ~/.ssh/id_rsa
+    - apt install -y curl dupload gnupg
+    - curl ifconfig.me
+    - ssh-keyscan -H 'uwmhub.uni-trier.de' >> ~/.ssh/known_hosts
+    # Populate a local keyring so dupload's openpgp-check has something
+    # to verify the already-signed .changes files against. This only
+    # needs the CI signing key's public half -- we reuse the same File
+    # variable ci_build_deb.sh uses for signing, since importing it
+    # also brings in the public key.
+    - gpg --batch --import "$SIGNING_PRIVATE_KEY"
+    - gpg --export --output ~/pubring.gpg
+  script:
+    - ls -l
+    - export RESDIR="deb_dist"
+    - ls -l $RESDIR
+    - |
+      cat > ~/.dupload.conf << EOF
+      package config;
+      \$default_host = "uwmhub";
+      \$cfg{'uwmhub'} = {
+        fqdn => "uwmhub.uni-trier.de",
+        method => "scp",
+        login => "reprepro",
+        incoming => "/home/reprepro/incoming/",
+        # files pass on to dinstall which sends emails itself
+        dinstall_runs => 1,
+        keyrings => ["$HOME/pubring.gpg"],
+      };
+      EOF
+    - cat ~/.dupload.conf
+    - |
+      for X in $( ls $RESDIR ); do
+        pushd $RESDIR/$X
+        ls -l
+        VENDNAM="DEB_${X^^}_VENDOR"
+        VEND="${!VENDNAM}"
+        if [ -z "$VEND" ]; then
+          echo "ERROR: no vendor recorded for distribution '$X' (missing $VENDNAM)" >&2
+          exit 1
+        fi
+        for Y in *.changes; do
+          cat $Y
+          NAMESRC=$(awk -F': ' '/^Source:/{print $2}' "$Y")
+          VERSION=$(awk -F': ' '/^Version:/{print $2}' "$Y")
+          echo "checking for ${NAMESRC} ${VERSION} in ${VEND}/${X}"
+          if ssh reprepro@uwmhub.uni-trier.de \
+              "reprepro -b /home/reprepro/repo/${VEND} list ${X} ${NAMESRC}" \
+              | awk '{print $NF}' | grep -qxF "${VERSION}"; then
+            echo "Package ${NAMESRC} ${VERSION} already in repo for ${X}, skipping upload."
+          else
+            dupload -f --nomail -t uwmhub "$Y"
+          fi
+          sleep 60
+        done
+        popd
+      done
+    - echo "Ende"
