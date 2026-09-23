@@ -1,0 +1,15 @@
+Source: haloviewer
+Section: science
+Priority: optional
+Maintainer: Clemens Drüe <druee@uni-trier.de>
+Build-Depends: debhelper-compat (= 13), dh-python, python3-all,
+ python3-setuptools, python3-setuptools-scm
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: python3-haloviewer
+Architecture: all
+Depends: ${python3:Depends}, ${misc:Depends},
+ python3-numpy, python3-pandas, python3-matplotlib, python3-tk
+Description: Viewer and plotting toolkit for Halo Photonics wind lidar data
+ Tkinter GUI, CLI and Python API for .hpl files.
