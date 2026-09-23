@@ -4,25 +4,57 @@ both the CLI (:mod:`windlidarviewer.cli`) and the GUI
 (:mod:`windlidarviewer.gui`). Use these directly from a script or
 notebook::
 
-    from windlidarviewer.api import plot_file
-    fig = plot_file("Processed_Wind_Profile_77_20260919_121707.hpl",
-                     output="profile.png")
+    from windlidarviewer import plot
+    fig = plot("Proc/2026/202609/20260919", kind="RHI", mode="history",
+               start="24h", time="2026-09-19 12:00", output="rhi.png")
+
+Three entry points, from highest- to lowest-level:
+
+:func:`plot`
+    Resolves ``path`` (a file, a directory searched recursively, or a
+    glob pattern -- or a mix of those), picks the file kind and time
+    range, and plots it. This is what :mod:`windlidarviewer.cli` calls
+    and is the right starting point for most scripting.
+:func:`plot_file`
+    Plots one already-known file.
+:func:`plot_files`
+    Plots several already-known files of the same kind together (a
+    History) -- or, for RHI's own ``"profile"`` mode, a single scan's
+    cross section if exactly one path is given.
 """
 
 from __future__ import annotations
 
+import contextlib
+import glob as _glob
+import re
+import warnings
 from pathlib import Path
-from typing import Iterable, Optional, Sequence, Tuple, Union
+from typing import Iterable, List, Optional, Sequence, Tuple, Union
 
+import matplotlib as mpl
+import pandas as pd
 from matplotlib.figure import Figure
 
 from . import data as _data
 from . import plotting
-from .scan import PROFILE_MODE, TIMESERIES_MODE, get_kind_info, parse_filename
+from .scan import (PROFILE_MODE, TIMESERIES_MODE, get_kind_info,
+                    parse_filename)
 
-__all__ = ['plot_file', 'plot_files']
+__all__ = ['plot', 'plot_file', 'plot_files']
 
 PathLike = Union[str, Path]
+
+#: Default figure size when none is given: A4 landscape, in inches
+#: (210mm x 297mm). Used by :func:`plot_file`/:func:`plot_files`
+#: (and so, transitively, :func:`plot`) -- not by the GUI, which sizes
+#: its embedded canvas from the window instead.
+DEFAULT_FIGSIZE: Tuple[float, float] = (11.69, 8.27)
+
+#: Default base font size (points) for all text in the figure --
+#: title, axis labels, ticks, colorbar labels. Pass ``fontsize=None``
+#: to leave matplotlib's own default alone instead.
+DEFAULT_FONTSIZE: Optional[float] = 16.0
 
 
 def _resolve_kind(path: PathLike) -> str:
@@ -51,11 +83,66 @@ def _check_supported(kind: str, mode: str) -> None:
 _SCAN_HISTORY_KINDS = {'VAD', 'Stare', 'Wind_Profile', 'RHI'}
 
 
+def _classify(kind: str, mode: str) -> str:
+    """Which of the four load/render pipelines a (kind, mode) pair maps
+    to -- the same classification as
+    :meth:`windlidarviewer.gui.WindLidarViewerApp._plot_kind`, but as a
+    pure function with no GUI state, used here only to decide whether
+    ``distance``/``speed`` apply (see :func:`_warn_if_inapplicable`)."""
+    if kind == 'Processed_Wind_Profile':
+        return 'wind_profile' if mode == PROFILE_MODE else 'wind_timeseries'
+    if kind == 'RHI' and mode == PROFILE_MODE:
+        return 'rhi_profile'
+    return 'scan_history'
+
+
+#: `distance` only means anything for RHI's own cross-section Profile.
+_DISTANCE_APPLICABLE = {'rhi_profile'}
+#: `speed` means a wind-speed or radial-velocity axis/colour range;
+#: the raw scan kinds' History image has no such dimension (its panels
+#: are intensity and beta).
+_SPEED_APPLICABLE = {'wind_profile', 'wind_timeseries', 'rhi_profile'}
+
+
+def _warn_if_inapplicable(kind: str, mode: str, *,
+                           distance=None, speed=None) -> None:
+    plot_kind = _classify(kind, mode)
+    if distance is not None and plot_kind not in _DISTANCE_APPLICABLE:
+        warnings.warn(
+            f'distance= is not applicable to {kind!r} in {mode!r} mode '
+            f'(only RHI\'s own "profile" mode has a distance axis) -- '
+            f'ignoring it', stacklevel=3)
+    if speed is not None and plot_kind not in _SPEED_APPLICABLE:
+        warnings.warn(
+            f'speed= is not applicable to {kind!r} in {mode!r} mode '
+            f'(its panels have no speed/velocity dimension) -- ignoring it',
+            stacklevel=3)
+
+
+@contextlib.contextmanager
+def _font_context(fontsize: Optional[float]):
+    """Apply ``fontsize`` as the base font size for every text artist
+    created inside the block (title, axis labels, ticks, colorbar
+    labels), via matplotlib's rcParams -- this works whether the
+    figure came from :mod:`matplotlib.pyplot` or a bare ``Figure()``,
+    since text objects capture their size from rcParams at creation
+    time. A no-op if ``fontsize`` is ``None``."""
+    if fontsize is None:
+        yield
+    else:
+        with mpl.rc_context({'font.size': fontsize}):
+            yield
+
+
 def plot_file(path: PathLike, *,
               mode: Optional[str] = None,
+              height: Optional[Tuple[float, float]] = None,
+              distance: Optional[Tuple[float, float]] = None,
+              speed: Optional[Tuple[float, float]] = None,
               output: Optional[PathLike] = None,
               show: bool = False,
-              figsize: Optional[Tuple[float, float]] = None) -> Figure:
+              figsize: Optional[Tuple[float, float]] = None,
+              fontsize: Optional[float] = DEFAULT_FONTSIZE) -> Figure:
     """
     Plot a single WindLidar file.
 
@@ -71,13 +158,26 @@ def plot_file(path: PathLike, *,
         for the scan kinds, one-file's-worth-of-rays) image; use \
         :func:`plot_files` to combine several files into a real \
         history.
+    :param height: fixed ``(min, max)`` for the shared vertical axis \
+        (height, or gate-inferred distance for the raw scan kinds); \
+        ``None`` autoscales. Always applicable.
+    :param distance: fixed ``(min, max)`` for the horizontal distance \
+        axis; only applicable to RHI's own "profile" mode -- a \
+        warning is issued (and the value ignored) otherwise.
+    :param speed: fixed ``(min, max)`` for the wind-speed/radial- \
+        velocity axis or colour range; not applicable to the raw scan \
+        kinds' "timeseries"/History image -- a warning is issued (and \
+        the value ignored) there.
     :param output: if given, save the figure to this path (format \
         inferred from the extension, e.g. ``.png``, ``.pdf``).
     :param show: if ``True``, display the figure in an interactive \
         window (blocks until closed). Requires an interactive \
         matplotlib backend to be available.
-    :param figsize: figure size in inches; a sensible default is used \
-        if omitted.
+    :param figsize: figure size in inches; defaults to \
+        :data:`DEFAULT_FIGSIZE` (A4 landscape) if omitted.
+    :param fontsize: base font size for all text in the figure; \
+        defaults to :data:`DEFAULT_FONTSIZE` (16). Pass ``None`` to \
+        leave matplotlib's own default alone.
     :returns: the :class:`~matplotlib.figure.Figure` that was drawn.
     """
     path = Path(path)
@@ -89,30 +189,36 @@ def plot_file(path: PathLike, *,
                 f'plotting is not yet implemented for file kind {kind!r}')
         mode = info.modes[0]
     _check_supported(kind, mode)
+    _warn_if_inapplicable(kind, mode, distance=distance, speed=speed)
+
+    figsize = figsize or DEFAULT_FIGSIZE
+
+    if mode == TIMESERIES_MODE:
+        return plot_files([path], mode=mode, height=height,
+                           distance=distance, speed=speed, output=output,
+                           show=show, figsize=figsize, fontsize=fontsize)
 
     fig = _new_figure(show, figsize)
-
-    if mode == PROFILE_MODE and kind == 'Processed_Wind_Profile':
-        prof = _data.load_profile(path)
-        fig, (ax_speed, ax_dir) = plotting.create_profile_figure(
-            figsize=figsize or (6.4, 6.0), fig=fig)
-        plotting.plot_wind_profile(
-            ax_speed, ax_dir, prof.height, prof.speed, prof.direction,
-            title=f'{kind}  {prof.timestamp:%Y-%m-%d %H:%M:%S}')
-    elif mode == PROFILE_MODE and kind == 'RHI':
-        cross = _data.load_rhi_cross_section(path)
-        fig, (ax_vel, ax_beta, cax_vel, cax_beta) = \
-            plotting.create_timeseries_figure(
-                figsize=figsize or (10.0, 6.0), fig=fig)
-        plotting.plot_rhi_cross_section(
-            ax_vel, ax_beta, cax_vel, cax_beta,
-            cross.distance, cross.height, cross.velocity, cross.beta,
-            title=f'{kind}  {cross.timestamp:%Y-%m-%d %H:%M:%S}')
-    elif mode == TIMESERIES_MODE:
-        return plot_files([path], mode=mode, output=output, show=show,
-                           figsize=figsize, fig=fig)
-    else:
-        raise ValueError(f'mode {mode!r} is not supported for kind {kind!r}')
+    with _font_context(fontsize):
+        if mode == PROFILE_MODE and kind == 'Processed_Wind_Profile':
+            prof = _data.load_profile(path)
+            fig, (ax_speed, ax_dir) = plotting.create_profile_figure(
+                figsize=figsize, fig=fig)
+            plotting.plot_wind_profile(
+                ax_speed, ax_dir, prof.height, prof.speed, prof.direction,
+                speed_xlim=speed, height_ylim=height,
+                title=f'{kind}  {prof.timestamp:%Y-%m-%d %H:%M:%S}')
+        elif mode == PROFILE_MODE and kind == 'RHI':
+            cross = _data.load_rhi_cross_section(path)
+            fig, (ax_vel, ax_beta, cax_vel, cax_beta) = \
+                plotting.create_timeseries_figure(figsize=figsize, fig=fig)
+            plotting.plot_rhi_cross_section(
+                ax_vel, ax_beta, cax_vel, cax_beta,
+                cross.distance, cross.height, cross.velocity, cross.beta,
+                distance_xlim=distance, height_ylim=height, speed_vlim=speed,
+                title=f'{kind}  {cross.timestamp:%Y-%m-%d %H:%M:%S}')
+        else:
+            raise ValueError(f'mode {mode!r} is not supported for kind {kind!r}')
 
     _finish(fig, output, show)
     return fig
@@ -120,9 +226,13 @@ def plot_file(path: PathLike, *,
 
 def plot_files(paths: Iterable[PathLike], *,
                 mode: str = TIMESERIES_MODE,
+                height: Optional[Tuple[float, float]] = None,
+                distance: Optional[Tuple[float, float]] = None,
+                speed: Optional[Tuple[float, float]] = None,
                 output: Optional[PathLike] = None,
                 show: bool = False,
                 figsize: Optional[Tuple[float, float]] = None,
+                fontsize: Optional[float] = DEFAULT_FONTSIZE,
                 fig: Optional[Figure] = None) -> Figure:
     """
     Plot several WindLidar files of the same kind together as a
@@ -134,9 +244,15 @@ def plot_files(paths: Iterable[PathLike], *,
     :param mode: only ``"timeseries"``/History is meaningful here for \
         multiple files; RHI's single-scan ``"profile"`` cross section \
         is routed to :func:`plot_file` if exactly one path is given.
+    :param height: see :func:`plot_file`.
+    :param distance: see :func:`plot_file`.
+    :param speed: see :func:`plot_file`.
     :param output: if given, save the figure to this path.
     :param show: if ``True``, display the figure interactively.
-    :param figsize: figure size in inches.
+    :param figsize: figure size in inches; defaults to \
+        :data:`DEFAULT_FIGSIZE` (A4 landscape) if omitted.
+    :param fontsize: base font size for all text in the figure; see \
+        :func:`plot_file`.
     :param fig: internal use (an already-created figure to draw into).
     :returns: the :class:`~matplotlib.figure.Figure` that was drawn.
     """
@@ -153,49 +269,253 @@ def plot_files(paths: Iterable[PathLike], *,
             raise ValueError(
                 'RHI "profile" mode is a single scan\'s cross section; '
                 'pass exactly one file (got %d)' % len(paths))
-        return plot_file(paths[0], mode=mode, output=output, show=show,
-                          figsize=figsize)
+        return plot_file(paths[0], mode=mode, height=height,
+                          distance=distance, speed=speed, output=output,
+                          show=show, figsize=figsize, fontsize=fontsize)
 
     _check_supported(kind, mode)
+    _warn_if_inapplicable(kind, mode, distance=distance, speed=speed)
 
+    figsize = figsize or DEFAULT_FIGSIZE
     if fig is None:
         fig = _new_figure(show, figsize)
 
-    if mode == TIMESERIES_MODE and kind == 'Processed_Wind_Profile':
-        series = _data.load_profile_series(paths)
-        fig, (ax_speed, ax_dir, cax_speed, cax_dir) = \
-            plotting.create_timeseries_figure(
-                figsize=figsize or (10.0, 6.0), fig=fig)
-        title = kind
-        if len(series.times):
-            title = (f'{kind}  '
-                      f'{series.times[0]:%Y-%m-%d %H:%M} – '
-                      f'{series.times[-1]:%Y-%m-%d %H:%M}')
-        plotting.plot_wind_timeseries(
-            ax_speed, ax_dir, cax_speed, cax_dir,
-            series.times, series.height, series.speed, series.direction,
-            title=title)
-    elif mode == TIMESERIES_MODE and kind in _SCAN_HISTORY_KINDS:
-        hist = _data.load_scan_history(paths)
-        fig, (ax_int, ax_beta, cax_int, cax_beta) = \
-            plotting.create_timeseries_figure(
-                figsize=figsize or (10.0, 6.0), fig=fig)
-        title = kind
-        if len(hist.times):
-            title = (f'{kind}  '
-                      f'{hist.times[0]:%Y-%m-%d %H:%M} – '
-                      f'{hist.times[-1]:%Y-%m-%d %H:%M}')
-        plotting.plot_scan_history(
-            ax_int, ax_beta, cax_int, cax_beta,
-            hist.times, hist.distance, hist.intensity, hist.beta,
-            title=title)
-    else:
-        raise ValueError(
-            f'mode {mode!r} is not supported for multiple files of kind '
-            f'{kind!r}')
+    with _font_context(fontsize):
+        if mode == TIMESERIES_MODE and kind == 'Processed_Wind_Profile':
+            series = _data.load_profile_series(paths)
+            fig, (ax_speed, ax_dir, cax_speed, cax_dir) = \
+                plotting.create_timeseries_figure(figsize=figsize, fig=fig)
+            title = kind
+            if len(series.times):
+                title = (f'{kind}  '
+                          f'{series.times[0]:%Y-%m-%d %H:%M} – '
+                          f'{series.times[-1]:%Y-%m-%d %H:%M}')
+            plotting.plot_wind_timeseries(
+                ax_speed, ax_dir, cax_speed, cax_dir,
+                series.times, series.height, series.speed, series.direction,
+                height_ylim=height, speed_vlim=speed, title=title)
+        elif mode == TIMESERIES_MODE and kind in _SCAN_HISTORY_KINDS:
+            hist = _data.load_scan_history(paths)
+            fig, (ax_int, ax_beta, cax_int, cax_beta) = \
+                plotting.create_timeseries_figure(figsize=figsize, fig=fig)
+            title = kind
+            if len(hist.times):
+                title = (f'{kind}  '
+                          f'{hist.times[0]:%Y-%m-%d %H:%M} – '
+                          f'{hist.times[-1]:%Y-%m-%d %H:%M}')
+            plotting.plot_scan_history(
+                ax_int, ax_beta, cax_int, cax_beta,
+                hist.times, hist.distance, hist.intensity, hist.beta,
+                distance_ylim=height, title=title)
+        else:
+            raise ValueError(
+                f'mode {mode!r} is not supported for multiple files of kind '
+                f'{kind!r}')
 
     _finish(fig, output, show)
     return fig
+
+
+# =========================================================================
+# plot(): path resolution (file / directory / glob) + kind + time-range
+# selection on top of plot_file/plot_files.
+# =========================================================================
+
+#: ``"##d"`` or ``"##h"`` (a plain number of days/hours, e.g. ``"24h"``
+#: or ``"2.5d"``) -- a relative :data:`start` interval back from
+#: :data:`end`, as opposed to an absolute timestamp.
+_RELATIVE_INTERVAL_RE = re.compile(r'^\s*(\d+(?:\.\d+)?)\s*([dh])\s*$',
+                                    re.IGNORECASE)
+
+
+def _is_glob_pattern(s: str) -> bool:
+    return any(c in s for c in '*?[')
+
+
+def _resolve_candidate_paths(path) -> List[Path]:
+    """
+    Expand ``path`` -- a single path/pattern, or an iterable of them --
+    into a flat, de-duplicated list of existing file paths: a
+    directory contributes every ``.hpl`` file recursively below it, a
+    glob pattern (containing ``*``, ``?`` or ``[``) is expanded, and a
+    plain existing file is used as-is. Unmatched patterns and missing
+    files are warned about, not raised, so one typo in a list of
+    several doesn't abort the whole call.
+    """
+    entries = [path] if isinstance(path, (str, Path)) else list(path)
+
+    out: List[Path] = []
+    seen = set()
+
+    def _add(p: Path) -> None:
+        rp = p.resolve()
+        if rp not in seen:
+            seen.add(rp)
+            out.append(p)
+
+    for entry in entries:
+        entry_str = str(entry)
+        p = Path(entry_str)
+        if p.is_dir():
+            for hpl_path in sorted(p.rglob('*.hpl')):
+                _add(hpl_path)
+        elif _is_glob_pattern(entry_str):
+            matches = sorted(_glob.glob(entry_str, recursive=True))
+            if not matches:
+                warnings.warn(f'no file matches {entry_str!r}', stacklevel=3)
+            for m in matches:
+                _add(Path(m))
+        elif p.exists():
+            _add(p)
+        else:
+            warnings.warn(f'{entry_str!r} does not exist', stacklevel=3)
+    return out
+
+
+def _normalize_mode(mode: Optional[str]) -> Optional[str]:
+    if mode is None:
+        return None
+    m = str(mode).strip().lower()
+    if m == 'profile':
+        return PROFILE_MODE
+    if m in ('history', 'timeseries'):
+        return TIMESERIES_MODE
+    raise ValueError(f'mode must be "profile" or "history", got {mode!r}')
+
+
+def plot(path: Union[PathLike, Iterable[PathLike]], *,
+         kind: Optional[str] = None,
+         mode: Optional[str] = None,
+         start: Optional[Union[str, pd.Timestamp]] = None,
+         end: Optional[Union[str, pd.Timestamp]] = None,
+         height: Optional[Tuple[float, float]] = None,
+         distance: Optional[Tuple[float, float]] = None,
+         speed: Optional[Tuple[float, float]] = None,
+         output: Optional[PathLike] = None,
+         show: bool = False,
+         figsize: Optional[Tuple[float, float]] = None,
+         fontsize: Optional[float] = DEFAULT_FONTSIZE) -> Figure:
+    """
+    High-level entry point: resolve ``path``, pick the file kind and
+    time range, and plot it. This is what :mod:`windlidarviewer.cli`
+    (``windlidar-plot``) calls; :func:`plot_file`/:func:`plot_files`
+    remain available for callers that have already resolved an exact
+    file or file list of one known kind.
+
+    :param path: a file, a directory (searched recursively for \
+        ``.hpl`` files), or a glob pattern (``*``, ``?``, ``[``) -- or \
+        an iterable of any mix of those.
+    :param kind: which file kind to plot (e.g. ``"RHI"``). Optional if \
+        every file ``path`` resolves to is the same kind (inferred \
+        from each filename); required if they span more than one kind.
+    :param mode: ``"profile"`` or ``"history"`` (``"timeseries"`` is \
+        also accepted). Defaults to ``"profile"`` if exactly one file \
+        falls in the resolved time range and the kind supports it, \
+        else ``"history"``. In ``"profile"`` mode with more than one \
+        file in range, the single most recent one (at or before \
+        ``end``) is plotted.
+    :param start: start of the time range: an absolute timestamp \
+        (e.g. ``"2026-09-21 00:00"``), or a relative interval back \
+        from ``end`` such as ``"24h"`` or ``"2d"``. Omit for no lower \
+        bound (every matching file up to ``end``).
+    :param end: end of the time range, an absolute timestamp. Defaults \
+        to the latest timestamp among the resolved (and kind-filtered) \
+        files -- which, when exactly one such file was found, is just \
+        that file's own timestamp.
+    :param height: fixed ``(min, max)`` for the shared vertical axis; \
+        ``None`` autoscales. Always applicable -- see :func:`plot_file`.
+    :param distance: fixed ``(min, max)`` for the horizontal distance \
+        axis (RHI "profile" mode only; warns and is ignored elsewhere) \
+        -- see :func:`plot_file`.
+    :param speed: fixed ``(min, max)`` for the wind-speed/radial- \
+        velocity axis or colour range (warns and is ignored for the \
+        raw scan kinds' History image) -- see :func:`plot_file`.
+    :param output: if given, save the figure to this path.
+    :param show: if ``True``, display the figure interactively.
+    :param figsize: figure size in inches; defaults to \
+        :data:`DEFAULT_FIGSIZE` (A4 landscape).
+    :param fontsize: base font size for all text in the figure; \
+        defaults to :data:`DEFAULT_FONTSIZE` (16).
+    :returns: the :class:`~matplotlib.figure.Figure` that was drawn.
+    :raises ValueError: if no files are found, if they span more than \
+        one kind and ``kind`` wasn't given, if ``kind`` matches none \
+        of them, or if none fall in the requested time range.
+    """
+    candidates = _resolve_candidate_paths(path)
+
+    parsed = []
+    for p in candidates:
+        info = parse_filename(p)
+        if info is None:
+            warnings.warn(
+                f'{p} does not look like a Halo-style ".hpl" filename -- '
+                f'skipping it', stacklevel=2)
+            continue
+        parsed.append((p, info.kind, info.timestamp))
+    if not parsed:
+        raise ValueError(f'no .hpl files found for {path!r}')
+
+    kinds_found = sorted({k for _, k, _ in parsed})
+    if kind is None:
+        if len(kinds_found) > 1:
+            raise ValueError(
+                f'{path!r} contains more than one file kind '
+                f'{kinds_found} -- pass kind= (-k/--kind) to select one')
+        kind = kinds_found[0]
+    else:
+        parsed = [(p, k, ts) for p, k, ts in parsed if k == kind]
+        if not parsed:
+            raise ValueError(
+                f'no files of kind {kind!r} found among {kinds_found}')
+
+    parsed.sort(key=lambda item: item[2])
+
+    end_ts = pd.Timestamp(end) if end is not None else parsed[-1][2]
+
+    start_ts = None
+    if start is not None:
+        m = _RELATIVE_INTERVAL_RE.match(str(start))
+        if m:
+            amount, unit = m.groups()
+            delta = (pd.Timedelta(days=float(amount)) if unit.lower() == 'd'
+                      else pd.Timedelta(hours=float(amount)))
+            start_ts = end_ts - delta
+        else:
+            start_ts = pd.Timestamp(start)
+
+    in_range = [(p, k, ts) for p, k, ts in parsed
+                if (start_ts is None or ts >= start_ts) and ts <= end_ts]
+    if not in_range:
+        raise ValueError(
+            f'no {kind!r} files in the selected time range '
+            f'({start_ts} .. {end_ts})')
+
+    info = get_kind_info(kind)
+    norm_mode = _normalize_mode(mode)
+    if norm_mode is None:
+        if len(in_range) == 1 and PROFILE_MODE in info.modes:
+            norm_mode = PROFILE_MODE
+        elif TIMESERIES_MODE in info.modes:
+            norm_mode = TIMESERIES_MODE
+        elif info.modes:
+            norm_mode = info.modes[0]
+        else:
+            raise NotImplementedError(
+                f'plotting is not yet implemented for file kind {kind!r}')
+
+    if norm_mode == PROFILE_MODE and len(in_range) > 1:
+        # "profile" is inherently single-scan: take the most recent
+        # file at or before `end` as the natural anchor for "the
+        # profile as of this time".
+        in_range = [in_range[-1]]
+
+    paths_out = [p for p, _, _ in in_range]
+    common_kwargs = dict(mode=norm_mode, height=height, distance=distance,
+                          speed=speed, output=output, show=show,
+                          figsize=figsize, fontsize=fontsize)
+    if len(paths_out) == 1:
+        return plot_file(paths_out[0], **common_kwargs)
+    return plot_files(paths_out, **common_kwargs)
 
 
 def _new_figure(show: bool, figsize: Optional[Tuple[float, float]]) -> Optional[Figure]:

@@ -26,7 +26,7 @@ on its own:
 | `windlidarviewer.scan` | finds `.hpl` files under a root directory, classifies them by kind from the filename, indexes by timestamp |
 | `windlidarviewer.data` | turns parsed files into plain numpy/pandas arrays ready to plot |
 | `windlidarviewer.plotting` | **pure matplotlib**, no GUI toolkit imports: figure/axes creation and drawing functions |
-| `windlidarviewer.api` | small programmatic entry points (`plot_file`, `plot_files`) |
+| `windlidarviewer.api` | programmatic entry points (`plot`, `plot_file`, `plot_files`); `plot` also re-exported as `windlidarviewer.plot` |
 | `windlidarviewer.cli` | command-line interface on top of `api` |
 | `windlidarviewer.gui` | Tkinter desktop app; wires widgets to `scan`/`data`/`plotting` and contains no plotting logic itself |
 
@@ -180,34 +180,82 @@ For `RHI` files:
 
 ## Command line
 
+`windlidar-plot FILE...` accepts one or more files, directories (searched
+recursively for `.hpl` files) and/or glob patterns, resolves the file
+kind and a time range, and plots it -- it's a thin CLI wrapper around
+`windlidarviewer.plot()` below.
+
 ```bash
-# a single profile
+# a single profile -- kind and "profile" mode both inferred, since
+# there's exactly one matching file
 windlidar-plot Processed_Wind_Profile_77_20260919_121707.hpl -o profile.png
 
-# a whole day as a time-height plot (shell-expanded glob, or quote it
-# and let the CLI expand it)
+# a whole day as a time-height plot: a directory is searched recursively,
+# a glob pattern is expanded -- both work the same way
+windlidar-plot Proc/2026/202609/20260919 \
+    --kind Processed_Wind_Profile -o 20260919_history.png
 windlidar-plot "Proc/2026/202609/20260919/Processed_Wind_Profile_*.hpl" \
-    --mode timeseries -o 20260919_timeseries.png
+    --mode history -o 20260919_history.png
 
-# open interactively instead of saving
-windlidar-plot some_file.hpl --show
+# -k/--kind is required only when FILE resolves to more than one kind
+# (e.g. a directory or pattern that covers several scan types)
+windlidar-plot Proc/2026/202609 --kind RHI -o rhi_all.png
+
+# a time range: -s/--start ("##d"/"##h" relative to the end time, or an
+# absolute timestamp) and -t/--time (the end timestamp, default: the
+# latest matching file's own timestamp)
+windlidar-plot Proc/2026/202609 --kind RHI \
+    --start 24h --time "2026-09-19 12:00" -o rhi_24h.png
+
+# fix axis ranges instead of autoscaling (--distance/--speed warn, but
+# don't fail, if they don't apply to the selected kind/mode)
+windlidar-plot some_profile.hpl --height 0 3000 --speed 0 20 -o profile.png
+
+# open interactively instead of (or as well as) saving
+windlidar-plot some_file.hpl --show      # or: -p / --plot
 ```
 
-Run `windlidar-plot --help` for all options.
+Figures default to A4 landscape (11.69 x 8.27 in) at 16pt base font;
+override with `--figsize WIDTH HEIGHT` / `--fontsize PT`. Run
+`windlidar-plot --help` for the full option list.
 
 ## Programmatic API
 
+`windlidarviewer.plot()` is the high-level entry point -- the same path
+resolution, kind/mode inference and time-range selection as the CLI,
+available directly from a script or notebook:
+
 ```python
-from windlidarviewer.api import plot_file, plot_files
+import windlidarviewer
+
+# single file -> "profile" mode inferred (a lone match); kind inferred
+# from the filename
+fig = windlidarviewer.plot(
+    "Processed_Wind_Profile_77_20260919_121707.hpl", output="profile.png")
+
+# a directory or glob pattern with more than one file kind needs kind=;
+# a time range narrows which files are included
+fig = windlidarviewer.plot(
+    "Proc/2026/202609", kind="RHI", start="24h",
+    end="2026-09-19 12:00", height=(0, 3000), speed=(0, 20),
+    output="rhi_24h.png")
+```
+
+`plot_file`/`plot_files` remain available (also re-exported at the
+package level) for callers that have already resolved an exact file or
+file list of one known kind, and skip path/kind/time-range resolution:
+
+```python
+from windlidarviewer import plot_file, plot_files
 
 # single file -> profile plot
 fig = plot_file("Processed_Wind_Profile_77_20260919_121707.hpl",
                  output="profile.png")
 
-# multiple files of the same kind -> time series plot
+# multiple files of the same kind -> a history (time series) plot
 fig = plot_files(sorted(glob.glob("Proc/2026/202609/20260919/"
                                    "Processed_Wind_Profile_*.hpl")),
-                  output="timeseries.png")
+                  output="history.png")
 ```
 
 ## Extending to more scan kinds

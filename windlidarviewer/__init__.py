@@ -24,14 +24,25 @@ and reasoned about on its own:
     draw on; know nothing about any GUI toolkit.
 
 ``api``
-    Small programmatic entry points (``plot_file`` / ``plot_files``) for
-    scripting and notebooks.
+    Small programmatic entry points (``plot`` / ``plot_file`` /
+    ``plot_files``) for scripting and notebooks.
 
 ``cli``
     Command-line interface built on top of ``api``.
 
 ``gui``
     Tkinter desktop application built on top of ``scan`` and ``plotting``.
+
+The high-level :func:`plot` function is re-exported at the package level,
+so ``windlidarviewer.plot(path, kind=..., ...)`` works directly::
+
+    import windlidarviewer
+    windlidarviewer.plot("Proc/2026/202609/20260919", mode="history",
+                          start="24h", output="day.png")
 """
+
+from .api import plot, plot_file, plot_files
+
+__all__ = ['plot', 'plot_file', 'plot_files']
 
 __version__ = "0.1.0"
