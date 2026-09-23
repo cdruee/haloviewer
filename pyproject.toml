@@ -3,13 +3,13 @@
 # developed with support of Anthropic Claude Opus 5.5
 
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "haloviewer"
-version = "0.1.0"
-description = "Viewer and plotting tools for Halo Photonics wind lidar data"
+dynamic = ["version"]
+description = "Viewer, plotting and synchronisation tools for Halo Photonics wind lidar data"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "EUPL-1.2" }
@@ -28,10 +28,20 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+docs = ["sphinx>=7"]
 
 [project.scripts]
 haloviewer = "haloviewer.gui:main"
 haloplot = "haloviewer.cli:main"
+halosync = "haloviewer.halosync:main"
 
 [tool.setuptools.packages.find]
 include = ["haloviewer*"]
+
+# Version number from the git history (tags like "v0.2.0" or "0.2.0").
+# Written to haloviewer/_version.py at build/install time; that file is
+# generated and must not be edited or committed.
+[tool.setuptools_scm]
+version_file = "haloviewer/_version.py"
+# used when no git metadata is available (e.g. installing from a zip)
+fallback_version = "0.1.0"

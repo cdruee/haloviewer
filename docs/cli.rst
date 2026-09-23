@@ -1,0 +1,174 @@
+================================
+Command-line tool (``haloplot``)
+================================
+
+``haloplot`` plots Halo wind lidar ``.hpl`` files to an image file (or
+an interactive window) without starting the GUI. It is a thin wrapper
+around :func:`haloviewer.plot <haloviewer.api.plot>` (see :doc:`api`): every option maps to a
+keyword argument of that function, so the command line and scripts
+behave identically.
+
+Synopsis
+--------
+
+.. code:: text
+
+   haloplot FILE [FILE ...] [-k KIND] [--mode {profile,history}]
+            [-s START] [-t TIME] [--height MIN MAX] [--dist MIN MAX]
+            [--speed MIN MAX] [-p PATH] [--show]
+            [--figsize WIDTH HEIGHT] [--verbose]
+
+How the plot is chosen
+----------------------
+
+``haloplot`` works through four steps. Each has a sensible default, so
+in the simplest case a single file name is enough.
+
+1. **Files.** Each ``FILE`` can be
+
+   * a single ``.hpl`` file,
+   * a directory, which is searched recursively for ``.hpl`` files, or
+   * a glob pattern (containing ``*``, ``?`` or ``[``; ``**`` also
+     matches sub-directories). Quote the pattern so the shell passes it
+     through unexpanded.
+
+   Any mix of these can be given. A pattern that matches nothing, a
+   missing path, or a file whose name doesn't follow the Halo naming
+   convention (``<Type words>_<system id>_<yyyymmdd>_<hhmmss>.hpl``)
+   produces a warning and is skipped. It does not abort the run.
+
+2. **Kind.** The file kind (``Processed_Wind_Profile``, ``VAD``,
+   ``Stare``, ``Wind_Profile``, ``RHI``) is read from each file name. If
+   all files are the same kind, nothing needs to be specified. If they
+   span several kinds (typically when a whole directory is given),
+   ``-k/--kind`` is required. The error message lists the kinds that
+   were found.
+
+3. **Time range.** ``-t/--time`` sets the end of the range. It defaults
+   to the timestamp of the newest selected file, which for a single file
+   is simply that file's own time. ``-s/--start`` sets the beginning,
+   either as an absolute timestamp (``"2026-09-19 06:00"``) or as an
+   interval back from the end: ``24h``, ``2d``, ``2.5d`` (days and hours,
+   case-insensitive, fractions allowed). Without ``--start`` there is no
+   lower limit. If no file falls into the range, ``haloplot`` stops with
+   an error.
+
+4. **Mode.** ``--mode profile`` draws a single scan and ``--mode
+   history`` combines all files in the range into a time/height (or
+   time/distance) image. By default, *profile* is used when exactly one
+   file is in range and the kind supports it, otherwise *history*. If
+   *profile* is requested while several files are in range, the newest
+   file at or before the end time is plotted.
+
+Which kinds support which mode:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 30 35
+
+   * - kind
+     - profile
+     - history
+   * - ``Processed_Wind_Profile``
+     - speed + direction vs. height
+     - speed + direction, time/height
+   * - ``RHI``
+     - velocity + beta, distance/height cross section
+     - intensity + beta, time/distance
+   * - ``VAD``, ``Stare``, ``Wind_Profile``
+     - --
+     - intensity + beta, time/distance
+
+The plots themselves are the same as in the graphic viewer and are
+described in more detail in :doc:`viewer`.
+
+Axis ranges
+-----------
+
+By default all axes and colour scales are autoscaled. Three options fix
+them instead, each taking a minimum and a maximum:
+
+``--height MIN MAX``
+   The shared vertical axis (height, or gate distance for the raw scan
+   kinds' history image). Always applicable.
+``--dist MIN MAX``
+   The horizontal distance axis. Only used for RHI profiles.
+``--speed MIN MAX``
+   The wind-speed / radial-velocity axis or colour range. Used wherever
+   speed is plotted (not in the raw scan kinds' intensity/beta history).
+
+If ``--dist`` or ``--speed`` don't apply to the selected kind and mode,
+``haloplot`` prints a warning and ignores them.
+
+Output
+------
+
+``-p/--plot PATH``
+   Save the figure to ``PATH``. The format follows the extension
+   (``.png``, ``.pdf``, ``.svg``, ... -- anything matplotlib supports).
+``--show``
+   Open the figure in an interactive matplotlib window. Can be combined
+   with ``-p``.
+
+If neither is given, the figure is saved as ``plot.png`` in the current
+directory, and a note saying so is printed.
+
+Figures are A4 landscape (11.69 x 8.27 in) by default; ``--figsize
+WIDTH HEIGHT`` (inches) changes that. There is no font-size option: the
+base font size scales with the figure area. It is 16 pt at A4 landscape
+(:data:`haloviewer.api.BASE_FONTSIZE_AT_A4`) and proportionally smaller
+or larger for other sizes, so text keeps the same relative size.
+
+Messages and exit status
+------------------------
+
+Advisory messages (skipped files, options that don't apply) are printed
+to standard error as ``warning: ...`` lines, and the plot is still made.
+Problems that prevent a plot (no files found, ambiguous kind, empty time
+range, unsupported kind/mode) are printed as ``error: ...`` and the exit
+status is 1. ``--verbose`` additionally prints debug logging, e.g. about
+truncated files. On success the exit status is 0.
+
+Examples
+--------
+
+.. code:: bash
+
+   # a single profile -- kind and "profile" mode both inferred, since
+   # there's exactly one matching file
+   haloplot Processed_Wind_Profile_77_20260919_121707.hpl -p profile.png
+
+   # a whole day as a time-height plot: a directory is searched recursively,
+   # a glob pattern is expanded -- both work the same way
+   haloplot Proc/2026/202609/20260919 \
+       --kind Processed_Wind_Profile -p 20260919_history.png
+   haloplot "Proc/2026/202609/20260919/Processed_Wind_Profile_*.hpl" \
+       --mode history -p 20260919_history.png
+
+   # -k/--kind is required only when FILE resolves to more than one kind
+   # (e.g. a directory or pattern that covers several scan types)
+   haloplot Proc/2026/202609 --kind RHI -p rhi_all.png
+
+   # a time range: -s/--start ("##d"/"##h" relative to the end time, or an
+   # absolute timestamp) and -t/--time (the end timestamp, default: the
+   # latest matching file's own timestamp)
+   haloplot Proc/2026/202609 --kind RHI \
+       --start 24h --time "2026-09-19 12:00" -p rhi_24h.png
+
+   # fix axis ranges instead of autoscaling (--dist/--speed warn, but
+   # don't fail, if they don't apply to the selected kind/mode)
+   haloplot some_profile.hpl --height 0 3000 --speed 0 20 -p profile.png
+
+   # open interactively instead of saving
+   haloplot some_file.hpl --show
+
+   # neither -p/--plot nor --show given -> saved as "plot.png"
+   haloplot some_file.hpl
+
+Option reference
+----------------
+
+This is the output of ``haloplot --help``:
+
+.. literalinclude:: _generated/haloplot_help.txt
+   :language: text

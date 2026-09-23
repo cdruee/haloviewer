@@ -36,6 +36,16 @@ and reasoned about on its own:
 ``gui``
     Tkinter desktop application built on top of ``scan`` and ``plotting``.
 
+``_metadata`` / ``_version``
+    Static project information (author, licence, ...) and the version
+    number, which setuptools-scm derives from the git history.
+
+``halosync``
+    Standalone Tkinter tool (``halosync`` command) for selectively
+    synchronising lidar data trees (``Metek``/``Proc``/``Raw``) from a
+    source to a destination. Standard library only; independent of the
+    other modules.
+
 The high-level :func:`plot` function is re-exported at the package level,
 so ``haloviewer.plot(path, kind=..., ...)`` works directly::
 
@@ -44,8 +54,16 @@ so ``haloviewer.plot(path, kind=..., ...)`` works directly::
                           start="24h", output="day.png")
 """
 
+from ._metadata import (__author__, __copyright__, __credits__,
+                        __description__, __email__, __license__,
+                        __product__, __title__)
+
+try:
+    # written by setuptools-scm at build/install time
+    from ._version import version as __version__
+except ImportError:  # running from a source tree that was never installed
+    __version__ = "0+unknown"
+
 from .api import plot, plot_file, plot_files
 
-__all__ = ['plot', 'plot_file', 'plot_files']
-
-__version__ = "0.1.0"
+__all__ = ['plot', 'plot_file', 'plot_files', '__version__']
