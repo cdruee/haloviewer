@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: EUPL-1.2
+# (c) 2026 Clemens Drüe, Universität Trier
+# developed with support of Anthropic Claude Opus 5.5
+#
+# Conda environment for HaloViewer.
+#
+# Create with:
+#   conda env create -f environment.yml
+# Activate with:
+#   conda activate haloviewer
+#
+# Notes:
+# - GUI toolkit is Tkinter, which ships as part of the standard "python"
+#   conda package on Linux, macOS and Windows (via its "tk" dependency),
+#   so no extra GUI package is required.
+# - Only numpy, pandas and matplotlib are added on top of a base
+#   miniconda install.
+name: haloviewer
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.9
+  - numpy
+  - pandas
+  - matplotlib
+  - pip
+  - pip:
+      - -e .

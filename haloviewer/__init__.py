@@ -1,8 +1,11 @@
+# SPDX-License-Identifier: EUPL-1.2
+# (c) 2026 Clemens Drüe, Universität Trier
+# developed with support of Anthropic Claude Opus 5.5
 """
-windlidarviewer
-================
+haloviewer
+==========
 
-Viewer and plotting tools for Halo Photonics WindLidar data (``.hpl``
+Viewer and plotting tools for Halo Photonics wind lidar data (``.hpl``
 files), covering the processed-product tree (``Proc/YYYY/YYYYMM/YYYYMMDD``)
 first, with raw-scan support intended to follow.
 
@@ -34,10 +37,10 @@ and reasoned about on its own:
     Tkinter desktop application built on top of ``scan`` and ``plotting``.
 
 The high-level :func:`plot` function is re-exported at the package level,
-so ``windlidarviewer.plot(path, kind=..., ...)`` works directly::
+so ``haloviewer.plot(path, kind=..., ...)`` works directly::
 
-    import windlidarviewer
-    windlidarviewer.plot("Proc/2026/202609/20260919", mode="history",
+    import haloviewer
+    haloviewer.plot("Proc/2026/202609/20260919", mode="history",
                           start="24h", output="day.png")
 """
 

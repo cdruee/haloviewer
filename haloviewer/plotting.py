@@ -1,12 +1,15 @@
+# SPDX-License-Identifier: EUPL-1.2
+# (c) 2026 Clemens Drüe, Universität Trier
+# developed with support of Anthropic Claude Opus 5.5
 """
-Pure matplotlib plotting functions for WindLidar data.
+Pure matplotlib plotting functions for Halo wind lidar data.
 
 Everything here works on plain ``matplotlib`` :class:`~matplotlib.figure.Figure`
 and :class:`~matplotlib.axes.Axes` objects and plain ``numpy``/``pandas``
 data; nothing in this module imports a GUI toolkit or knows about the
 directory-scanning or file-parsing layers. That keeps it usable from a
 script, a notebook, the CLI, or a GUI equally, and is what
-:mod:`windlidarviewer.gui` embeds via ``FigureCanvasTkAgg``.
+:mod:`haloviewer.gui` embeds via ``FigureCanvasTkAgg``.
 
 Figure/axes creation is split from drawing (``create_*_figure`` vs.
 ``plot_*``) so a caller that steps through many files -- the GUI's
@@ -367,7 +370,7 @@ def plot_scan_history(
     Clears and redraws in place, same as :func:`plot_wind_timeseries`.
 
     Cells that were never populated (see
-    :func:`windlidarviewer.data.load_scan_history`) are ``nan``;
+    :func:`haloviewer.data.load_scan_history`) are ``nan``;
     ``pcolormesh`` leaves ``nan`` cells uncoloured, so an empty time bin
     shows as blank background rather than an interpolated guess.
 

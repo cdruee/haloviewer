@@ -1,5 +1,8 @@
+# SPDX-License-Identifier: EUPL-1.2
+# (c) 2026 Clemens Drüe, Universität Trier
+# developed with support of Anthropic Claude Opus 5.5
 """
-Tkinter desktop application for browsing WindLidar ``Proc`` data.
+Tkinter desktop application for browsing Halo wind lidar ``Proc`` data.
 
 Tkinter is used because it ships with the standard ``python`` conda
 package on Linux, macOS and Windows (via its ``tk`` dependency), so a
@@ -8,13 +11,13 @@ plain ``conda install numpy pandas matplotlib`` (see
 package is needed.
 
 This module only wires widgets to the pure functions in
-:mod:`windlidarviewer.scan`, :mod:`windlidarviewer.data` and
-:mod:`windlidarviewer.plotting`; it contains no plotting logic of its
+:mod:`haloviewer.scan`, :mod:`haloviewer.data` and
+:mod:`haloviewer.plotting`; it contains no plotting logic of its
 own (see those modules' docstrings), and no file-format knowledge (see
-:mod:`windlidarviewer.hpl`).
+:mod:`haloviewer.hpl`).
 
 Four (kind, mode) combinations are plottable, each routed to its own
-load/render pair (see :meth:`WindLidarViewerApp._plot_kind`):
+load/render pair (see :meth:`HaloViewerApp._plot_kind`):
 
 * ``wind_profile`` -- ``Processed_Wind_Profile`` + Profile: one file's
   height/speed/direction profile.
@@ -29,7 +32,7 @@ load/render pair (see :meth:`WindLidarViewerApp._plot_kind`):
 
 Three range controls (Height, Distance, Speed -- see
 :class:`_RangeControl`) sit in the left panel; which ones are enabled
-depends on the current plot kind (:meth:`WindLidarViewerApp.
+depends on the current plot kind (:meth:`HaloViewerApp.
 _update_range_controls_enabled`).
 """
 
@@ -307,15 +310,15 @@ class _RangeControl:
         self.on_manual_change()
 
 
-class WindLidarViewerApp:
+class HaloViewerApp:
     """Top-level application: owns the Tk widgets and the currently
     scanned/selected state, and delegates all data loading to
-    :mod:`windlidarviewer.data`/:mod:`windlidarviewer.scan` and all
-    drawing to :mod:`windlidarviewer.plotting`."""
+    :mod:`haloviewer.data`/:mod:`haloviewer.scan` and all
+    drawing to :mod:`haloviewer.plotting`."""
 
     def __init__(self, root: tk.Tk, initial_dir: Optional[str] = None):
         self.root = root
-        root.title('WindLidar Viewer')
+        root.title('HaloViewer')
         root.geometry('1280x800')
 
         self.scan_result: Optional[ScanResult] = None
@@ -601,7 +604,7 @@ class WindLidarViewerApp:
             return
         path = Path(root_dir)
         if not path.exists():
-            messagebox.showerror('WindLidar Viewer',
+            messagebox.showerror('HaloViewer',
                                   f'Directory does not exist:\n{path}')
             return
         self.status_var.set(f'Scanning {path}…')
@@ -741,7 +744,7 @@ class WindLidarViewerApp:
             return pd.Timestamp(text)
         except (ValueError, TypeError):
             messagebox.showerror(
-                'WindLidar Viewer',
+                'HaloViewer',
                 f'Could not parse time {text!r}.\n'
                 f'Expected a format like "{_TIME_FMT}".')
             return None
@@ -1291,7 +1294,7 @@ def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     initial_dir = argv[0] if argv else None
     root = tk.Tk()
-    WindLidarViewerApp(root, initial_dir=initial_dir)
+    HaloViewerApp(root, initial_dir=initial_dir)
     root.mainloop()
     return 0
 

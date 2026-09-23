@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: EUPL-1.2
+# (c) 2026 Clemens Drüe, Universität Trier
+# developed with support of Anthropic Claude Opus 5.5
 """
 Parser for Halo Photonics Ltd. wind-lidar ``.hpl`` files.
 
 This module is adapted from the ``hpl`` module of `cdruee/python-readmet
 <https://github.com/cdruee/python-readmet>`_ (C. Drüe, University of
 Trier), which is licensed under the European Union Public Licence v1.2
-(EUPL-1.2); this file is redistributed here under the same licence
-(see ``LICENSE-EUPL-1.2.txt`` at the project root). The rest of the
-``windlidarviewer`` package is licensed separately (see ``LICENSE.txt``).
+(EUPL-1.2), the same licence as the rest of the ``haloviewer`` package
+(see ``LICENSE`` at the project root).
 Most changes are cosmetic (module path, a couple of type-hint
 compatibility tweaks); the one functional change is adding ``'Stare'``
 to :data:`TYPES`, so a ``Scan type: Stare`` header (a real Halo scan

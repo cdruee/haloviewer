@@ -1,0 +1,17 @@
+Filename:	VAD_77_20260921_000721.hpl
+System ID:	77
+Number of gates:	20
+Range gate length (m):	18.0
+Gate length (pts):	6
+Pulses/ray:	30000
+No. of rays in file:	6
+Scan type:	VAD - overlapping
+Focus range:	1000
+Start time:	20260921 00:07:30.02
+Resolution (m/s):	0.0382
+Range of measurement (center of gate) = Gate length / 2 + (range gate x 3)
+Data line 1: Decimal time (hours)  Azimuth (degrees)  Elevation (degrees) Pitch (degrees) Roll (degrees)
+f9.6,1x,f6.2,1x,f6.2
+Data line 2: Range Gate  Doppler (m/s)  Intensity (SNR + 1)  Beta (m-1 sr-1)
+i3,1x,f6.4,1x,f8.6,1x,e12.6 - repeat for no. gates
+****

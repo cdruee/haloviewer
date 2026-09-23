@@ -1,7 +1,10 @@
+# SPDX-License-Identifier: EUPL-1.2
+# (c) 2026 Clemens Drüe, Universität Trier
+# developed with support of Anthropic Claude Opus 5.5
 """
-Command-line interface for plotting WindLidar files without the GUI.
+Command-line interface for plotting Halo wind lidar files without the GUI.
 
-``windlidar-plot`` is a thin wrapper around :func:`windlidarviewer.plot`:
+``haloplot`` is a thin wrapper around :func:`haloviewer.plot`:
 it turns the command line into keyword arguments for that function, which
 does all the real work (resolving ``FILE`` to a list of ``.hpl`` files,
 picking a kind/mode/time-range, and drawing the figure).
@@ -9,23 +12,23 @@ picking a kind/mode/time-range, and drawing the figure).
 Examples::
 
     # plot a single processed wind profile, save as PNG
-    windlidar-plot Processed_Wind_Profile_77_20260919_121707.hpl \\
+    haloplot Processed_Wind_Profile_77_20260919_121707.hpl \\
         -p profile.png
 
     # combine a day's worth of profiles into a time-height plot
-    windlidar-plot Proc/2026/202609/20260919 \\
+    haloplot Proc/2026/202609/20260919 \\
         --kind Processed_Wind_Profile --mode history \\
         --plot 20260919_history.png
 
     # last 24h of RHI scans up to a given time, with fixed axis ranges
-    windlidar-plot Proc/2026/202609 --kind RHI --start 24h --time \\
+    haloplot Proc/2026/202609 --kind RHI --start 24h --time \\
         "2026-09-19 12:00" --height 0 3000 -p rhi_24h.png
 
     # open interactively instead of (or as well as) saving
-    windlidar-plot some_file.hpl --show
+    haloplot some_file.hpl --show
 
     # neither -p/--plot nor --show given -> saved as "plot.png"
-    windlidar-plot some_file.hpl
+    haloplot some_file.hpl
 """
 
 from __future__ import annotations
@@ -43,8 +46,8 @@ DEFAULT_OUTPUT = 'plot.png'
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog='windlidar-plot',
-        description='Plot Halo Photonics WindLidar .hpl file(s).')
+        prog='haloplot',
+        description='Plot Halo Photonics wind lidar .hpl file(s).')
     parser.add_argument(
         'files', nargs='+', metavar='FILE',
         help='file(s), directory/directories (searched recursively for '

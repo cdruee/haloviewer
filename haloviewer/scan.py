@@ -1,5 +1,8 @@
+# SPDX-License-Identifier: EUPL-1.2
+# (c) 2026 Clemens Drüe, Universität Trier
+# developed with support of Anthropic Claude Opus 5.5
 """
-Directory scanning and indexing for WindLidar ``Proc`` trees.
+Directory scanning and indexing for Halo wind lidar ``Proc`` trees.
 
 Halo Photonics processed-product files follow the naming convention
 ``<Type words>_<system id>_<yyyymmdd>_<hhmmss>.hpl``, e.g.
@@ -15,7 +18,7 @@ time range without opening every file up front.
 
 Classifying and timestamping purely from the filename keeps scanning an
 Otherwise expensive directory tree fast even with tens of thousands of
-files: full parsing (via :mod:`windlidarviewer.hpl`) only happens for
+files: full parsing (via :mod:`haloviewer.hpl`) only happens for
 the handful of files actually plotted.
 """
 

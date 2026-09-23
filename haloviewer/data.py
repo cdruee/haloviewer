@@ -1,7 +1,10 @@
+# SPDX-License-Identifier: EUPL-1.2
+# (c) 2026 Clemens Drüe, Universität Trier
+# developed with support of Anthropic Claude Opus 5.5
 """
 Domain-level data extraction for plotting: turns parsed ``.hpl`` files
-(see :mod:`windlidarviewer.hpl`) into plain numpy/pandas structures
-that :mod:`windlidarviewer.plotting` can draw, without either module
+(see :mod:`haloviewer.hpl`) into plain numpy/pandas structures
+that :mod:`haloviewer.plotting` can draw, without either module
 knowing about the other's concerns (file format vs. rendering).
 """
 

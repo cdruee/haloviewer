@@ -1,10 +1,13 @@
+# SPDX-License-Identifier: EUPL-1.2
+# (c) 2026 Clemens Drüe, Universität Trier
+# developed with support of Anthropic Claude Opus 5.5
 """
-Programmatic entry points for plotting WindLidar files, independent of
-both the CLI (:mod:`windlidarviewer.cli`) and the GUI
-(:mod:`windlidarviewer.gui`). Use these directly from a script or
+Programmatic entry points for plotting Halo wind lidar files,
+independent of both the CLI (:mod:`haloviewer.cli`) and the GUI
+(:mod:`haloviewer.gui`). Use these directly from a script or
 notebook::
 
-    from windlidarviewer import plot
+    from haloviewer import plot
     fig = plot("Proc/2026/202609/20260919", kind="RHI", mode="history",
                start="24h", end="2026-09-19 12:00", output="rhi.png")
 
@@ -13,7 +16,7 @@ Three entry points, from highest- to lowest-level:
 :func:`plot`
     Resolves ``path`` (a file, a directory searched recursively, or a
     glob pattern -- or a mix of those), picks the file kind and time
-    range, and plots it. This is what :mod:`windlidarviewer.cli` calls
+    range, and plots it. This is what :mod:`haloviewer.cli` calls
     and is the right starting point for most scripting.
 :func:`plot_file`
     Plots one already-known file.
@@ -96,14 +99,14 @@ def _check_supported(kind: str, mode: str) -> None:
 
 #: Kinds with no instrument-processed profile of their own: History
 #: mode comes from the raw per-gate intensity/beta instead of a
-#: derived wind speed/direction (see :func:`~windlidarviewer.data.load_scan_history`).
+#: derived wind speed/direction (see :func:`~haloviewer.data.load_scan_history`).
 _SCAN_HISTORY_KINDS = {'VAD', 'Stare', 'Wind_Profile', 'RHI'}
 
 
 def _classify(kind: str, mode: str) -> str:
     """Which of the four load/render pipelines a (kind, mode) pair maps
     to -- the same classification as
-    :meth:`windlidarviewer.gui.WindLidarViewerApp._plot_kind`, but as a
+    :meth:`haloviewer.gui.HaloViewerApp._plot_kind`, but as a
     pure function with no GUI state, used here only to decide whether
     ``distance``/``speed`` apply (see :func:`_warn_if_inapplicable`)."""
     if kind == 'Processed_Wind_Profile':
@@ -161,7 +164,7 @@ def plot_file(path: PathLike, *,
               figsize: Optional[Tuple[float, float]] = None,
               fontsize: Optional[float] = None) -> Figure:
     """
-    Plot a single WindLidar file.
+    Plot a single Halo wind lidar file.
 
     :param path: path to a ``.hpl`` file.
     :param mode: ``"profile"`` or ``"timeseries"`` (shown in the GUI as \
@@ -255,7 +258,7 @@ def plot_files(paths: Iterable[PathLike], *,
                 fontsize: Optional[float] = None,
                 fig: Optional[Figure] = None) -> Figure:
     """
-    Plot several WindLidar files of the same kind together as a
+    Plot several Halo wind lidar files of the same kind together as a
     History: height/time (speed/direction as colour) for
     ``Processed_Wind_Profile``, or distance/time (intensity/beta as
     colour) for VAD, Stare, Wind_Profile or RHI.
@@ -418,8 +421,8 @@ def plot(path: Union[PathLike, Iterable[PathLike]], *,
          fontsize: Optional[float] = None) -> Figure:
     """
     High-level entry point: resolve ``path``, pick the file kind and
-    time range, and plot it. This is what :mod:`windlidarviewer.cli`
-    (``windlidar-plot``) calls; :func:`plot_file`/:func:`plot_files`
+    time range, and plot it. This is what :mod:`haloviewer.cli`
+    (``haloplot``) calls; :func:`plot_file`/:func:`plot_files`
     remain available for callers that have already resolved an exact
     file or file list of one known kind.
 
