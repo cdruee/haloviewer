@@ -17,7 +17,7 @@ VERSION=${FULLNAME##*-}
 # Python (PEP 440) pre-release and dev versions must sort *before* the
 # final release in Debian too. Debian only does that for "~", so turn
 #   0.2.0rc2 -> 0.2.0~rc2,  0.2.0a1 -> 0.2.0~a1,  0.2.0b3 -> 0.2.0~b3,
-#   0.2.1.dev3+g1a2b3c -> 0.2.1~dev3+g1a2b3c
+#   0.2.1.dev3+g1a2b3c -> 0.2.1~~dev3+g1a2b3c
 # Only the public part (before "+") is touched, so letters inside a
 # setuptools-scm local version such as "+g1a2b3c" stay unchanged.
 PUBLIC_VERSION=${VERSION%%+*}
@@ -229,6 +229,17 @@ if [ "$(id -u)" = "0" ]; then
   apt-get -y --no-install-recommends build-dep ./
 else
   echo "WARNING: not root, cannot install build dependencies" >&2
+fi
+
+# setuptools-scm < 8 (e.g. Debian bookworm: 7.1) does not know the
+# [tool.setuptools_scm] option "version_file" and aborts with
+# "unexpected keyword argument 'version_file'". Its older name
+# "write_to" does the same and is still accepted by >= 8, so rename it
+# in the unpacked build tree only (the repository stays unchanged).
+SCM_MAJOR=$( python3 -c "import importlib.metadata as m; print(m.version('setuptools-scm').split('.')[0])" 2>/dev/null || echo "" )
+if [ -n "$SCM_MAJOR" ] && [ "$SCM_MAJOR" -lt 8 ] && grep -qE '^[[:space:]]*version_file[[:space:]]*=' pyproject.toml; then
+  echo "setuptools-scm $SCM_MAJOR.x found: using 'write_to' instead of 'version_file'"
+  sed -i -E 's/^([[:space:]]*)version_file([[:space:]]*=)/\1write_to\2/' pyproject.toml
 fi
 
 # Disable tests during package build (they may need special setup)
