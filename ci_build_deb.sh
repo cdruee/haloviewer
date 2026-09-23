@@ -1,6 +1,15 @@
 #!/bin/bash
+# Abort on the first failing command. Without this, a failing dh_make
+# (e.g. because the licence file was not found) went unnoticed and the
+# script ran on into dpkg-buildpackage, which then died with the
+# misleading "cannot open file debian/changelog".
+set -eo pipefail
 
 BUILD_VERSION=$1
+if [ -z "$BUILD_VERSION" ]; then
+  echo "ERROR: usage: $0 <sdist file name, e.g. pkg-1.2.3.tar.gz>" >&2
+  exit 1
+fi
 
 FULLNAME=${BUILD_VERSION%.tar.gz}
 VERSION=${FULLNAME##*-}
@@ -38,11 +47,10 @@ print(res)
 "
 }
 
-if [ -e deb_dist/$CODENAME ]; then
-  rm -r deb_dist/$CODENAME
-else
-  mkdir -p deb_dist/$CODENAME
-fi
+# Start from a clean, *existing* directory (previously an existing one
+# was removed but not recreated, so the pushd below failed).
+rm -rf deb_dist/$CODENAME
+mkdir -p deb_dist/$CODENAME
 pushd deb_dist/$CODENAME
 
 cp ../../dist/${FULLNAME}.tar.gz .
@@ -57,17 +65,48 @@ DESCRIPTION=$(get_project_info "description")
 # show what we got
 echo "Using metadata: AUTHOR='$AUTHOR', EMAIL='$EMAIL', DESCRIPTION='$DESCRIPTION'"
 
-rm -r debian/ 2>/dev/null || true
+# The sdist may ship the repository's debian/ directory (setuptools-scm
+# puts every git-tracked file into it). dh_make refuses to run if
+# debian/ exists, so move it aside and keep a hand-written copyright.
+USER_COPYRIGHT=""
+if [ -f debian/copyright ]; then
+  USER_COPYRIGHT=$( mktemp )
+  cp debian/copyright "$USER_COPYRIGHT"
+fi
+rm -rf debian/
+
+# Licence file: accept the usual names instead of only LICENSE.txt.
+# (With LICENSE.txt missing, readlink returned nothing, --copyrightfile
+# swallowed the next option and dh_make failed without creating debian/.)
+LICENSE_FILE=""
+for F in LICENSE LICENSE.txt LICENSE.md LICENCE LICENCE.txt COPYING; do
+  if [ -f "$F" ]; then LICENSE_FILE=$( readlink -e "$F" ); break; fi
+done
+if [ -z "$LICENSE_FILE" ]; then
+  echo "ERROR: no licence file (LICENSE, LICENSE.txt, ...) found in sdist" >&2
+  exit 1
+fi
+echo "Using licence file: $LICENSE_FILE"
 
 export DEBFULLNAME="$AUTHOR"
 dh_make --python -p ${NAME}_${VERSION}+1${CODENAME}1 \
   -f ../${FULLNAME}.tar.gz \
   -c custom \
-  --copyrightfile $( readlink -e LICENSE.txt ) \
+  --copyrightfile "$LICENSE_FILE" \
   --email "$EMAIL" \
   --yes
 
+# Prefer the maintained debian/copyright from the repository, if any.
+if [ -n "$USER_COPYRIGHT" ]; then
+  echo "Using debian/copyright from repository"
+  cp "$USER_COPYRIGHT" debian/copyright
+fi
+
 ls -l debian
+if [ ! -f debian/changelog ]; then
+  echo "ERROR: dh_make did not create debian/changelog" >&2
+  exit 1
+fi
 
 # Set the correct distribution *before* building, so the signed .changes
 # file already has the right value. dh_make writes the top changelog
@@ -99,7 +138,8 @@ BEGIN{doc=0}
 (doc==0){print $0}
 ' debian/control.old | tee debian/control
 
-# Add setuptools_scm to build dependencies
+# Add setuptools_scm, build and the PEP 517 pybuild plugin (needed for
+# pyproject.toml-only packages without setup.py) to build dependencies
 echo " " >> debian/control
 mv debian/control debian/control.old
 awk '
@@ -115,6 +155,9 @@ BEGIN{
   if (index($0, "python3-build") == 0) {
     $0 = $0", python3-build"
   }
+  if (index($0, "pybuild-plugin-pyproject") == 0) {
+    $0 = $0", pybuild-plugin-pyproject"
+  }
   print $0
   next
 }
@@ -125,6 +168,9 @@ BEGIN{
 (block==1 && $0 ~ /python3-build/){
   pb=1
 }
+(block==1 && $0 ~ /pybuild-plugin-pyproject/){
+  ppp=1
+}
 (block==1 && $0 ~ /^[^ ]/){
   block=0
   if (pss==0){
@@ -133,11 +179,15 @@ BEGIN{
   if (pb==0){
     print " python3-build,"
   }
+  if (ppp==0){
+    print " pybuild-plugin-pyproject,"
+  }
 }
 /^Build-Depends:[\s]*/{
   block=1
   pss=0
   pb=0
+  ppp=0
 }
 {print $0}
 ' debian/control.old | tee debian/control
@@ -159,7 +209,9 @@ export PYBUILD_DISABLE=test
 
 # Install the signing key and get its ID
 # $SIGNING_PRIVATE_KEY holds a PATH, not the key content
-IMPORT_STATUS=$(gpg --batch --status-fd 1 --import "$SIGNING_PRIVATE_KEY" 2>/dev/null)
+# "|| true": under set -e a failing import would otherwise abort here,
+# before the explanatory error message below.
+IMPORT_STATUS=$(gpg --batch --status-fd 1 --import "$SIGNING_PRIVATE_KEY" 2>/dev/null || true)
 # NOTE: gpg emits a separate IMPORT_OK line for the public key half and
 # the secret key half of the same import, both carrying the same
 # fingerprint in field 4. Without "exit", awk matches both lines and
@@ -170,7 +222,7 @@ SIGNING_PRIVATE_KEY_ID=$(echo "$IMPORT_STATUS" | awk '/IMPORT_OK/ {print $4; exi
 
 if [ -z "$SIGNING_PRIVATE_KEY_ID" ]; then
   echo "ERROR: failed to import signing key or extract its ID" >&2
-  gpg --batch --status-fd 1 --import "$SIGNING_PRIVATE_KEY"
+  gpg --batch --status-fd 1 --import "$SIGNING_PRIVATE_KEY" || true
   exit 1
 fi
 
