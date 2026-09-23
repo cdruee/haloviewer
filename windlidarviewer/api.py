@@ -6,7 +6,7 @@ notebook::
 
     from windlidarviewer import plot
     fig = plot("Proc/2026/202609/20260919", kind="RHI", mode="history",
-               start="24h", time="2026-09-19 12:00", output="rhi.png")
+               start="24h", end="2026-09-19 12:00", output="rhi.png")
 
 Three entry points, from highest- to lowest-level:
 
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import glob as _glob
+import math
 import re
 import warnings
 from pathlib import Path
@@ -51,10 +52,26 @@ PathLike = Union[str, Path]
 #: its embedded canvas from the window instead.
 DEFAULT_FIGSIZE: Tuple[float, float] = (11.69, 8.27)
 
-#: Default base font size (points) for all text in the figure --
-#: title, axis labels, ticks, colorbar labels. Pass ``fontsize=None``
-#: to leave matplotlib's own default alone instead.
-DEFAULT_FONTSIZE: Optional[float] = 16.0
+#: Base font size (points), for all text in the figure -- title, axis
+#: labels, ticks, colorbar labels -- at :data:`DEFAULT_FIGSIZE` (A4
+#: landscape). This is the anchor :func:`_auto_fontsize` scales from;
+#: it is not itself a fixed default (see there).
+BASE_FONTSIZE_AT_A4: float = 16.0
+
+
+def _auto_fontsize(figsize: Tuple[float, float]) -> float:
+    """The default font size when ``fontsize`` isn't given explicitly:
+    proportional to ``figsize``'s area, equal to
+    :data:`BASE_FONTSIZE_AT_A4` at the default A4-landscape size
+    (:data:`DEFAULT_FIGSIZE`) and scaling smoothly for any other size
+    -- e.g. a figure with half the area gets a ~30% smaller base font,
+    the same way print typography scales text with the page rather
+    than pinning it to one absolute size regardless of how big the
+    page is."""
+    a4_w, a4_h = DEFAULT_FIGSIZE
+    w, h = figsize
+    scale = math.sqrt((w * h) / (a4_w * a4_h))
+    return BASE_FONTSIZE_AT_A4 * scale
 
 
 def _resolve_kind(path: PathLike) -> str:
@@ -142,7 +159,7 @@ def plot_file(path: PathLike, *,
               output: Optional[PathLike] = None,
               show: bool = False,
               figsize: Optional[Tuple[float, float]] = None,
-              fontsize: Optional[float] = DEFAULT_FONTSIZE) -> Figure:
+              fontsize: Optional[float] = None) -> Figure:
     """
     Plot a single WindLidar file.
 
@@ -175,9 +192,11 @@ def plot_file(path: PathLike, *,
         matplotlib backend to be available.
     :param figsize: figure size in inches; defaults to \
         :data:`DEFAULT_FIGSIZE` (A4 landscape) if omitted.
-    :param fontsize: base font size for all text in the figure; \
-        defaults to :data:`DEFAULT_FONTSIZE` (16). Pass ``None`` to \
-        leave matplotlib's own default alone.
+    :param fontsize: base font size for all text in the figure; if \
+        omitted, scales proportionally with ``figsize`` (see \
+        :func:`_auto_fontsize`), working out to \
+        :data:`BASE_FONTSIZE_AT_A4` (16) at the default A4-landscape \
+        size.
     :returns: the :class:`~matplotlib.figure.Figure` that was drawn.
     """
     path = Path(path)
@@ -199,7 +218,8 @@ def plot_file(path: PathLike, *,
                            show=show, figsize=figsize, fontsize=fontsize)
 
     fig = _new_figure(show, figsize)
-    with _font_context(fontsize):
+    resolved_fontsize = fontsize if fontsize is not None else _auto_fontsize(figsize)
+    with _font_context(resolved_fontsize):
         if mode == PROFILE_MODE and kind == 'Processed_Wind_Profile':
             prof = _data.load_profile(path)
             fig, (ax_speed, ax_dir) = plotting.create_profile_figure(
@@ -232,7 +252,7 @@ def plot_files(paths: Iterable[PathLike], *,
                 output: Optional[PathLike] = None,
                 show: bool = False,
                 figsize: Optional[Tuple[float, float]] = None,
-                fontsize: Optional[float] = DEFAULT_FONTSIZE,
+                fontsize: Optional[float] = None,
                 fig: Optional[Figure] = None) -> Figure:
     """
     Plot several WindLidar files of the same kind together as a
@@ -280,7 +300,8 @@ def plot_files(paths: Iterable[PathLike], *,
     if fig is None:
         fig = _new_figure(show, figsize)
 
-    with _font_context(fontsize):
+    resolved_fontsize = fontsize if fontsize is not None else _auto_fontsize(figsize)
+    with _font_context(resolved_fontsize):
         if mode == TIMESERIES_MODE and kind == 'Processed_Wind_Profile':
             series = _data.load_profile_series(paths)
             fig, (ax_speed, ax_dir, cax_speed, cax_dir) = \
@@ -394,7 +415,7 @@ def plot(path: Union[PathLike, Iterable[PathLike]], *,
          output: Optional[PathLike] = None,
          show: bool = False,
          figsize: Optional[Tuple[float, float]] = None,
-         fontsize: Optional[float] = DEFAULT_FONTSIZE) -> Figure:
+         fontsize: Optional[float] = None) -> Figure:
     """
     High-level entry point: resolve ``path``, pick the file kind and
     time range, and plot it. This is what :mod:`windlidarviewer.cli`
@@ -434,8 +455,9 @@ def plot(path: Union[PathLike, Iterable[PathLike]], *,
     :param show: if ``True``, display the figure interactively.
     :param figsize: figure size in inches; defaults to \
         :data:`DEFAULT_FIGSIZE` (A4 landscape).
-    :param fontsize: base font size for all text in the figure; \
-        defaults to :data:`DEFAULT_FONTSIZE` (16).
+    :param fontsize: base font size for all text in the figure; if \
+        omitted, scales proportionally with ``figsize`` -- see \
+        :func:`plot_file`.
     :returns: the :class:`~matplotlib.figure.Figure` that was drawn.
     :raises ValueError: if no files are found, if they span more than \
         one kind and ``kind`` wasn't given, if ``kind`` matches none \

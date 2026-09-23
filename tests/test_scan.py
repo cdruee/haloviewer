@@ -1,6 +1,10 @@
+# SPDX-License-Identifier: EUPL-1.2
+# (c) 2026 Clemens Drüe, Universität Trier
+# developed with support of Anthropic Claude Opus 5.5
+
 import pandas as pd
 
-from windlidarviewer.scan import parse_filename, scan_directory, get_kind_info
+from haloviewer.scan import parse_filename, scan_directory, get_kind_info
 
 
 def test_parse_filename_processed_profile():

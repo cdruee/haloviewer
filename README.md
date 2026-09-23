@@ -1,6 +1,6 @@
-# WindLidar Viewer
+# HaloViewer
 
-A viewer and plotting toolkit for Halo Photonics WindLidar data
+A viewer and plotting toolkit for Halo Photonics wind lidar data
 (`.hpl` files) covering the **processed-product** tree
 (`Proc/YYYY/YYYYMM/YYYYMMDD/*.hpl`). Every kind found there is
 plottable: the instrument-processed **Processed Wind Profile** (a
@@ -15,33 +15,13 @@ other kind besides Processed Wind Profile with one. Any other kind
 found on disk is still listed (so you can see what's in your data
 tree) but reported as not yet implemented.
 
-## Design
-
-The code is layered so each piece can be used, tested and understood
-on its own:
-
-| module | responsibility |
-|---|---|
-| `windlidarviewer.hpl` | `.hpl` file format parser (adapted from [cdruee/python-readmet](https://github.com/cdruee/python-readmet)'s `hpl` module) |
-| `windlidarviewer.scan` | finds `.hpl` files under a root directory, classifies them by kind from the filename, indexes by timestamp |
-| `windlidarviewer.data` | turns parsed files into plain numpy/pandas arrays ready to plot |
-| `windlidarviewer.plotting` | **pure matplotlib**, no GUI toolkit imports: figure/axes creation and drawing functions |
-| `windlidarviewer.api` | programmatic entry points (`plot`, `plot_file`, `plot_files`); `plot` also re-exported as `windlidarviewer.plot` |
-| `windlidarviewer.cli` | command-line interface on top of `api` |
-| `windlidarviewer.gui` | Tkinter desktop app; wires widgets to `scan`/`data`/`plotting` and contains no plotting logic itself |
-
-`plotting.py` never imports `tkinter`, and `gui.py` never calls
-matplotlib drawing primitives directly -- it only calls functions in
-`plotting.py`. This means the exact same plotting code is used by the
-GUI, the CLI, and any script that imports `windlidarviewer.api`.
-
 ## Installation
 
 ### Conda (recommended -- minimal footprint on top of miniconda)
 
 ```bash
 conda env create -f environment.yml
-conda activate windlidarviewer
+conda activate haloviewer
 ```
 
 This only adds `numpy`, `pandas` and `matplotlib` on top of a base
@@ -64,8 +44,8 @@ already includes it.)
 ## Running the GUI
 
 ```bash
-windlidar-gui                  # then pick a directory from the GUI
-windlidar-gui /path/to/Data/Proc   # or start with a directory already loaded
+haloviewer                     # then pick a directory from the GUI
+haloviewer /path/to/Data/Proc   # or start with a directory already loaded
 ```
 
 Layout: a settings panel on the left (root directory picker, file-kind
@@ -180,73 +160,87 @@ For `RHI` files:
 
 ## Command line
 
-`windlidar-plot FILE...` accepts one or more files, directories (searched
+`haloplot FILE...` accepts one or more files, directories (searched
 recursively for `.hpl` files) and/or glob patterns, resolves the file
 kind and a time range, and plots it -- it's a thin CLI wrapper around
-`windlidarviewer.plot()` below.
+`haloviewer.plot()` below.
 
 ```bash
 # a single profile -- kind and "profile" mode both inferred, since
 # there's exactly one matching file
-windlidar-plot Processed_Wind_Profile_77_20260919_121707.hpl -o profile.png
+haloplot Processed_Wind_Profile_77_20260919_121707.hpl -p profile.png
 
 # a whole day as a time-height plot: a directory is searched recursively,
 # a glob pattern is expanded -- both work the same way
-windlidar-plot Proc/2026/202609/20260919 \
-    --kind Processed_Wind_Profile -o 20260919_history.png
-windlidar-plot "Proc/2026/202609/20260919/Processed_Wind_Profile_*.hpl" \
-    --mode history -o 20260919_history.png
+haloplot Proc/2026/202609/20260919 \
+    --kind Processed_Wind_Profile -p 20260919_history.png
+haloplot "Proc/2026/202609/20260919/Processed_Wind_Profile_*.hpl" \
+    --mode history -p 20260919_history.png
 
 # -k/--kind is required only when FILE resolves to more than one kind
 # (e.g. a directory or pattern that covers several scan types)
-windlidar-plot Proc/2026/202609 --kind RHI -o rhi_all.png
+haloplot Proc/2026/202609 --kind RHI -p rhi_all.png
 
 # a time range: -s/--start ("##d"/"##h" relative to the end time, or an
 # absolute timestamp) and -t/--time (the end timestamp, default: the
 # latest matching file's own timestamp)
-windlidar-plot Proc/2026/202609 --kind RHI \
-    --start 24h --time "2026-09-19 12:00" -o rhi_24h.png
+haloplot Proc/2026/202609 --kind RHI \
+    --start 24h --time "2026-09-19 12:00" -p rhi_24h.png
 
-# fix axis ranges instead of autoscaling (--distance/--speed warn, but
+# fix axis ranges instead of autoscaling (--dist/--speed warn, but
 # don't fail, if they don't apply to the selected kind/mode)
-windlidar-plot some_profile.hpl --height 0 3000 --speed 0 20 -o profile.png
+haloplot some_profile.hpl --height 0 3000 --speed 0 20 -p profile.png
 
-# open interactively instead of (or as well as) saving
-windlidar-plot some_file.hpl --show      # or: -p / --plot
+# open interactively instead of saving
+haloplot some_file.hpl --show
+
+# neither -p/--plot nor --show given -> saved as "plot.png"
+haloplot some_file.hpl
 ```
 
-Figures default to A4 landscape (11.69 x 8.27 in) at 16pt base font;
-override with `--figsize WIDTH HEIGHT` / `--fontsize PT`. Run
-`windlidar-plot --help` for the full option list.
+Figures default to A4 landscape (11.69 x 8.27 in); override with
+`--figsize WIDTH HEIGHT`. The base font size isn't a separate option --
+it scales automatically with the figure's area, working out to 16pt at
+the default A4 landscape size (see `haloviewer.api.BASE_FONTSIZE_AT_A4`)
+and proportionally smaller/larger for any other `--figsize`. Run
+`haloplot --help` for the full option list.
 
 ## Programmatic API
 
-`windlidarviewer.plot()` is the high-level entry point -- the same path
+`haloviewer.plot()` is the high-level entry point -- the same path
 resolution, kind/mode inference and time-range selection as the CLI,
 available directly from a script or notebook:
 
 ```python
-import windlidarviewer
+import haloviewer
 
 # single file -> "profile" mode inferred (a lone match); kind inferred
 # from the filename
-fig = windlidarviewer.plot(
+fig = haloviewer.plot(
     "Processed_Wind_Profile_77_20260919_121707.hpl", output="profile.png")
 
 # a directory or glob pattern with more than one file kind needs kind=;
 # a time range narrows which files are included
-fig = windlidarviewer.plot(
+fig = haloviewer.plot(
     "Proc/2026/202609", kind="RHI", start="24h",
     end="2026-09-19 12:00", height=(0, 3000), speed=(0, 20),
     output="rhi_24h.png")
+
+# fontsize defaults to scaling with figsize (16pt at A4 landscape,
+# proportionally smaller/larger otherwise); pass it explicitly to
+# override that
+fig = haloviewer.plot("some_profile.hpl", figsize=(6, 4), fontsize=10)
 ```
+
+Note `distance=` is the API-level name for what the CLI calls `--dist`
+(kept short on the command line only).
 
 `plot_file`/`plot_files` remain available (also re-exported at the
 package level) for callers that have already resolved an exact file or
 file list of one known kind, and skip path/kind/time-range resolution:
 
 ```python
-from windlidarviewer import plot_file, plot_files
+from haloviewer import plot_file, plot_files
 
 # single file -> profile plot
 fig = plot_file("Processed_Wind_Profile_77_20260919_121707.hpl",
@@ -258,7 +252,29 @@ fig = plot_files(sorted(glob.glob("Proc/2026/202609/20260919/"
                   output="history.png")
 ```
 
-## Extending to more scan kinds
+## Design
+
+### File structure
+
+The code is layered so each piece can be used, tested and understood
+on its own:
+
+| module | responsibility |
+|---|---|
+| `haloviewer.hpl` | `.hpl` file format parser (adapted from [cdruee/python-readmet](https://github.com/cdruee/python-readmet)'s `hpl` module) |
+| `haloviewer.scan` | finds `.hpl` files under a root directory, classifies them by kind from the filename, indexes by timestamp |
+| `haloviewer.data` | turns parsed files into plain numpy/pandas arrays ready to plot |
+| `haloviewer.plotting` | **pure matplotlib**, no GUI toolkit imports: figure/axes creation and drawing functions |
+| `haloviewer.api` | programmatic entry points (`plot`, `plot_file`, `plot_files`); `plot` also re-exported as `haloviewer.plot` |
+| `haloviewer.cli` | command-line interface on top of `api` |
+| `haloviewer.gui` | Tkinter desktop app; wires widgets to `scan`/`data`/`plotting` and contains no plotting logic itself |
+
+`plotting.py` never imports `tkinter`, and `gui.py` never calls
+matplotlib drawing primitives directly -- it only calls functions in
+`plotting.py`. This means the exact same plotting code is used by the
+GUI, the CLI, and any script that imports `haloviewer.api`.
+
+### Extending to more scan kinds
 
 `Processed_Wind_Profile`, `VAD`, `Stare`, `Wind_Profile` and `RHI` are
 all implemented; a user-defined pattern (`User1`...`User5` in the raw
@@ -274,24 +290,31 @@ the same recipe:
 3. Register the kind's capabilities in `scan.KIND_CAPABILITIES`
    (`supported=True`, its plot modes).
 4. Wire the new mode(s) into `api.plot_file`/`plot_files`, and into
-   `gui.WindLidarViewerApp._plot_kind` (which of the four load/render
+   `gui.HaloViewerApp._plot_kind` (which of the four load/render
    pipelines applies) and `_update_range_controls_enabled` (which of
    Height/Distance/Speed make sense for it).
 
 The GUI will then automatically offer that kind and mode as soon as it
 is discovered on disk -- no other GUI changes are needed.
 
-## Tests
+### Tests
 
 ```bash
 pip install -e ".[dev]"
 pytest
 ```
 
-## Licensing
+## Licence
 
-This project is MIT-licensed (`LICENSE.txt`), except
-`windlidarviewer/hpl.py`, which is adapted from
-[cdruee/python-readmet](https://github.com/cdruee/python-readmet) and
-remains under the European Union Public Licence v1.2
-(`LICENSE-EUPL-1.2.txt`).
+HaloViewer is licensed under the European Union Public Licence v1.2
+(EUPL-1.2); see [`LICENSE`](LICENSE) for the full licence text.
+
+`haloviewer/hpl.py` is adapted from the `hpl` module of
+[cdruee/python-readmet](https://github.com/cdruee/python-readmet),
+which is itself licensed under the EUPL-1.2.
+
+## Copyright
+
+(c) 2026 Clemens Drüe, Universität Trier
+
+Developed with support of Anthropic Claude Opus 5.5.

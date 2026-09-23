@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: EUPL-1.2
+# (c) 2026 Clemens Drüe, Universität Trier
+# developed with support of Anthropic Claude Opus 5.5
+
 import numpy as np
 import pytest
 

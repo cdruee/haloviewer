@@ -10,19 +10,22 @@ Examples::
 
     # plot a single processed wind profile, save as PNG
     windlidar-plot Processed_Wind_Profile_77_20260919_121707.hpl \\
-        --output profile.png
+        -p profile.png
 
     # combine a day's worth of profiles into a time-height plot
     windlidar-plot Proc/2026/202609/20260919 \\
         --kind Processed_Wind_Profile --mode history \\
-        --output 20260919_history.png
+        --plot 20260919_history.png
 
     # last 24h of RHI scans up to a given time, with fixed axis ranges
     windlidar-plot Proc/2026/202609 --kind RHI --start 24h --time \\
-        "2026-09-19 12:00" --height 0 3000 --output rhi_24h.png
+        "2026-09-19 12:00" --height 0 3000 -p rhi_24h.png
 
     # open interactively instead of (or as well as) saving
     windlidar-plot some_file.hpl --show
+
+    # neither -p/--plot nor --show given -> saved as "plot.png"
+    windlidar-plot some_file.hpl
 """
 
 from __future__ import annotations
@@ -33,6 +36,9 @@ import warnings
 from typing import List, Optional
 
 from . import api
+
+#: Output filename used when neither -p/--plot nor --show is given.
+DEFAULT_OUTPUT = 'plot.png'
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,7 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
         '--height', nargs=2, type=float, metavar=('MIN', 'MAX'),
         help='fix the height/vertical axis range (deselects autoscale)')
     parser.add_argument(
-        '--distance', nargs=2, type=float, metavar=('MIN', 'MAX'),
+        '--dist', dest='distance', nargs=2, type=float,
+        metavar=('MIN', 'MAX'),
         help='fix the distance (range) axis for RHI profile plots '
              '(deselects autoscale; warns if not applicable)')
     parser.add_argument(
@@ -77,19 +84,17 @@ def build_parser() -> argparse.ArgumentParser:
         help='fix the wind-speed/velocity axis or colour range '
              '(deselects autoscale; warns if not applicable)')
     parser.add_argument(
-        '--output', '-o', metavar='PATH',
-        help='save the figure to PATH (format inferred from extension, '
-             'e.g. .png, .pdf, .svg)')
+        '-p', '--plot', dest='output', metavar='PATH',
+        help='save the figure to PATH (format inferred from the '
+             'extension, e.g. .png, .pdf, .svg). If neither this nor '
+             '--show is given, the figure is saved as %r'
+             % DEFAULT_OUTPUT)
     parser.add_argument(
-        '-p', '--plot', '--show', dest='show', action='store_true',
+        '--show', action='store_true',
         help='display the figure in an interactive window')
     parser.add_argument(
         '--figsize', nargs=2, type=float, metavar=('WIDTH', 'HEIGHT'),
         help='figure size in inches (default: A4 landscape, 11.69x8.27)')
-    parser.add_argument(
-        '--fontsize', type=float, metavar='PT',
-        help='base font size in points for titles/labels/ticks '
-             '(default: 16)')
     parser.add_argument(
         '--verbose', '-v', action='store_true', help='enable debug logging')
     return parser
@@ -103,16 +108,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         import logging
         logging.basicConfig(level=logging.DEBUG)
 
-    if not args.output and not args.show:
-        print('note: neither --output nor --show/-p given; the figure '
-              'will be built but not saved or displayed', file=sys.stderr)
+    output = args.output
+    if output is None and not args.show:
+        output = DEFAULT_OUTPUT
+        print(f'note: neither -p/--plot nor --show given; saving to '
+              f'{output!r}', file=sys.stderr)
 
     kwargs = dict(
         kind=args.kind,
         mode=args.mode,
         start=args.start,
         end=args.end,
-        output=args.output,
+        output=output,
         show=args.show,
     )
     if args.height is not None:
@@ -123,8 +130,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         kwargs['speed'] = tuple(args.speed)
     if args.figsize is not None:
         kwargs['figsize'] = tuple(args.figsize)
-    if args.fontsize is not None:
-        kwargs['fontsize'] = args.fontsize
 
     try:
         with warnings.catch_warnings(record=True) as caught:

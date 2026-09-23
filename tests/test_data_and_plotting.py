@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: EUPL-1.2
+# (c) 2026 Clemens Drüe, Universität Trier
+# developed with support of Anthropic Claude Opus 5.5
+
 from pathlib import Path
 
 import numpy as np
@@ -5,8 +9,8 @@ import pytest
 import matplotlib
 matplotlib.use("Agg")
 
-from windlidarviewer import data, hpl, plotting
-from windlidarviewer.scan import scan_directory
+from haloviewer import data, hpl, plotting
+from haloviewer.scan import scan_directory
 
 # Small real (trimmed) regular-scan fixtures -- see tests/data/README
 # for how they were derived from the user's own sample files.

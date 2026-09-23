@@ -1,16 +1,24 @@
+# SPDX-License-Identifier: EUPL-1.2
+# (c) 2026 Clemens Drüe, Universität Trier
+# developed with support of Anthropic Claude Opus 5.5
+
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "windlidarviewer"
+name = "haloviewer"
 version = "0.1.0"
-description = "Viewer and plotting tools for Halo Photonics WindLidar data"
+description = "Viewer and plotting tools for Halo Photonics wind lidar data"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = { text = "EUPL-1.2" }
 authors = [
-    { name = "Clemens" }
+    { name = "Clemens Drüe", email = "druee@uni-trier.de" }
+]
+classifiers = [
+    "License :: OSI Approved :: European Union Public Licence 1.2 (EUPL 1.2)",
+    "Programming Language :: Python :: 3",
 ]
 dependencies = [
     "numpy",
@@ -22,8 +30,8 @@ dependencies = [
 dev = ["pytest"]
 
 [project.scripts]
-windlidar-gui = "windlidarviewer.gui:main"
-windlidar-plot = "windlidarviewer.cli:main"
+haloviewer = "haloviewer.gui:main"
+haloplot = "haloviewer.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["windlidarviewer*"]
+include = ["haloviewer*"]
