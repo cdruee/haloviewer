@@ -106,7 +106,7 @@ Intensity filter
 Low-signal data can be hidden with the intensity filter. It is off by
 default. ``--filter VALUE`` blanks every data point whose intensity
 (SNR + 1) is below ``VALUE``. ``--filter True`` uses the default
-threshold of 1.18 (:data:`haloviewer.data.DEFAULT_INTENSITY_FILTER`).
+threshold of 1.018 (:data:`haloviewer.data.DEFAULT_INTENSITY_FILTER`).
 Anything else that isn't a number is an error.
 
 What gets blanked depends on the kind:
@@ -118,9 +118,10 @@ What gets blanked depends on the kind:
 * ``Processed_Wind_Profile`` (profile and history): wind speed and
   direction. These files carry no intensity of their own, so it is
   taken from the ``Wind_Profile`` scan file with the same system id and
-  timestamp in the same directory. Every beam of that scan is
-  converted to height with its own elevation, its intensity is
-  interpolated to the profile's heights, and the beams are averaged. A
+  timestamp in the same directory. Level *n* of the processed profile
+  (its *n*-th row, in metres of height) belongs to range gate *n* of
+  the scan (counted in gate numbers); the intensity of that gate is
+  averaged over all beams of the scan. A
   profile without a matching ``Wind_Profile`` file is plotted
   unfiltered, and a warning says how many were affected.
 
@@ -187,7 +188,7 @@ Examples
    # don't fail, if they don't apply to the selected kind/mode)
    haloplot some_profile.hpl --height 0 3000 --speed 0 20 -p profile.png
 
-   # hide low-signal data: "True" uses the default threshold 1.18,
+   # hide low-signal data: "True" uses the default threshold 1.018,
    # or give a threshold of your own
    haloplot Proc/2026/202609/20260919 --kind VAD --filter True -p vad.png
    haloplot Proc/2026/202609/20260919 --kind Processed_Wind_Profile \

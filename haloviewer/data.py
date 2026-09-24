@@ -43,7 +43,7 @@ __all__ = [
 #: switched on without an explicit value (``filter=True`` in
 #: :func:`haloviewer.plot <haloviewer.api.plot>`, ``--filter True`` in
 #: ``haloplot``, and the initial value of the GUI's filter field).
-DEFAULT_INTENSITY_FILTER: float = 1.18
+DEFAULT_INTENSITY_FILTER: float = 1.018
 
 _TRUE_WORDS = {'true', 'yes', 'on', 'default'}
 _FALSE_WORDS = {'false', 'no', 'off', 'none', ''}
@@ -114,8 +114,9 @@ class ProfileData:
     speed: np.ndarray
     direction: np.ndarray
     path: Path
-    #: Intensity (SNR + 1) at each ``height``, taken from the matching
-    #: ``Wind_Profile`` scan file (see :func:`load_wind_profile_intensity`).
+    #: Intensity (SNR + 1) of each level, taken from the same-numbered
+    #: range gate of the matching ``Wind_Profile`` scan file (see
+    #: :func:`load_wind_profile_intensity`).
     #: Only filled in when the intensity filter was requested; ``None``
     #: if it wasn't, or if no matching scan file was found (in which
     #: case speed/direction are left unfiltered).
@@ -143,49 +144,58 @@ def find_wind_profile_file(path) -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
-def load_wind_profile_intensity(path, height: np.ndarray) -> np.ndarray:
+def load_wind_profile_intensity(path, n_levels: int) -> np.ndarray:
     """
-    Intensity (SNR + 1) of a ``Wind_Profile`` scan file at the given
-    ``height`` levels (m), for filtering the matching processed profile.
+    Intensity (SNR + 1) of a ``Wind_Profile`` scan file, one value per
+    level of the matching processed profile.
 
-    Every ray (beam) of the scan is converted from range gates to
-    height with its own tilt-corrected elevation (see
-    :func:`_tilt_corrected_unit_components`), its intensity is
-    interpolated linearly onto ``height``, and the result is averaged
-    over all rays -- the same "one value per level from all beams" that
-    the processed profile itself represents. A level more than one gate
-    below the lowest or above the highest gate of a ray gets no value
-    from that ray; a level no ray covers is ``nan``.
+    The processed profile's levels correspond one-to-one to the scan's
+    range gates: level *n* (the *n*-th data row of the
+    ``Processed_Wind_Profile`` file, in file order) belongs to gate *n*
+    (``Range Gate`` column) of the ``Wind_Profile`` scan. The two files
+    just express the vertical coordinate differently -- height in
+    metres there, gate number here -- so no geometric conversion is
+    done. The intensity of gate *n* is averaged over all rays (beams)
+    of the scan.
 
+    If the scan has fewer gates than the profile has levels, the extra
+    levels get ``nan`` (and are therefore not filtered); extra gates are
+    ignored. A mismatch is logged as a warning.
+
+    :param path: path to the ``Wind_Profile`` file.
+    :param n_levels: number of levels in the processed profile.
+    :returns: array of length ``n_levels``.
     :raises ValueError: if the file contains no usable ray data.
     """
-    height = np.asarray(height, dtype=float)
     f = hpl.DataFile(str(path))
     if not f.rays:
         raise ValueError(f'{path} contains no scan (ray) data')
-    gate_length = float(f.header.get('gatelength') or 1.0) if f.header else 1.0
 
     per_ray: List[np.ndarray] = []
+    n_gates = 0
     for r in f.rays:
         ng = len(r.data.index)
         if ng == 0:
             continue
-        _horiz, vert = _tilt_corrected_unit_components(
-            r.azimuth, r.elevation, r.pitch, r.roll)
-        if vert <= 0:
-            continue  # a beam at/below the horizon has no height axis
-        gate_height = _gate_distance_axis(gate_length, ng) * vert
         inten = pd.to_numeric(r.data['Intensity'], errors='coerce').to_numpy()
-        ok = np.isfinite(inten)
-        if not ok.any():
-            continue
-        h_ok, i_ok = gate_height[ok], inten[ok]
-        values = np.interp(height, h_ok, i_ok)
-        step = gate_length * vert
-        values[(height < h_ok[0] - step) | (height > h_ok[-1] + step)] = np.nan
-        per_ray.append(values)
+        if 'Range Gate' in r.data.columns:
+            gate = pd.to_numeric(r.data['Range Gate'],
+                                 errors='coerce').to_numpy()
+        else:
+            gate = np.arange(ng, dtype=float)
+        ok = np.isfinite(gate) & (gate >= 0) & (gate < n_levels)
+        row = np.full(n_levels, np.nan)
+        row[gate[ok].astype(int)] = inten[ok]
+        per_ray.append(row)
+        n_gates = max(n_gates, int(np.nanmax(gate)) + 1
+                      if np.isfinite(gate).any() else ng)
     if not per_ray:
         raise ValueError(f'{path} contains no usable intensity data')
+    if n_gates != n_levels:
+        logger.warning('%s: %d range gates but the processed profile has %d '
+                       'levels -- matching level n to gate n for the first '
+                       '%d only', Path(path).name, n_gates, n_levels,
+                       min(n_gates, n_levels))
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)  # all-nan levels
         return np.nanmean(np.vstack(per_ray), axis=0)
@@ -197,9 +207,10 @@ def load_profile(path, intensity_min: Optional[float] = None) -> ProfileData:
 
     :param path: path to the file.
     :param intensity_min: optional intensity filter threshold: speed \
-        and direction at levels where the matching ``Wind_Profile`` \
-        scan (:func:`find_wind_profile_file`) has an intensity below \
-        this value are set to ``nan``. If that scan file doesn't exist \
+        and direction at level *n* are set to ``nan`` where gate *n* of \
+        the matching ``Wind_Profile`` scan \
+        (:func:`find_wind_profile_file`) has a (ray-averaged) intensity \
+        below this value. If that scan file doesn't exist \
         or can't be read, a warning is logged, the profile is returned \
         unfiltered and :attr:`ProfileData.filter_missing` is set.
     :raises ValueError: if the file does not contain processed profile \
@@ -212,31 +223,37 @@ def load_profile(path, intensity_min: Optional[float] = None) -> ProfileData:
         raise ValueError(
             f'{path} does not contain Processed Wind Profile data '
             f'(got scan type {d.type!r})')
-    df = d.profile.sort_index()
+    # keep file order until the intensity is attached: level n of the
+    # file belongs to gate n of the matching Wind_Profile scan
+    df = d.profile.copy()
+    filter_missing = False
+    if intensity_min is not None:
+        wp_path = find_wind_profile_file(path)
+        if wp_path is None:
+            logger.warning('%s: no matching Wind_Profile file found -- '
+                           'intensity filter not applied', path.name)
+            filter_missing = True
+        else:
+            try:
+                df['intensity'] = load_wind_profile_intensity(wp_path,
+                                                              len(df))
+            except (IOError, ValueError) as exc:
+                logger.warning('%s: could not read intensity from %s (%s) '
+                               '-- intensity filter not applied',
+                               path.name, wp_path.name, exc)
+                filter_missing = True
+    df = df.sort_index()
     prof = ProfileData(
         timestamp=d.timestamp,
         height=df.index.to_numpy(dtype=float),
         speed=df['speed'].to_numpy(dtype=float),
         direction=df['direction'].to_numpy(dtype=float),
         path=path,
+        filter_missing=filter_missing,
     )
-    if intensity_min is None:
+    if 'intensity' not in df.columns:
         return prof
-
-    wp_path = find_wind_profile_file(path)
-    if wp_path is None:
-        logger.warning('%s: no matching Wind_Profile file found -- '
-                       'intensity filter not applied', path.name)
-        prof.filter_missing = True
-        return prof
-    try:
-        prof.intensity = load_wind_profile_intensity(wp_path, prof.height)
-    except (IOError, ValueError) as exc:
-        logger.warning('%s: could not read intensity from %s (%s) -- '
-                       'intensity filter not applied',
-                       path.name, wp_path.name, exc)
-        prof.filter_missing = True
-        return prof
+    prof.intensity = df['intensity'].to_numpy(dtype=float)
     prof.speed = _mask_below(prof.speed, prof.intensity, intensity_min)
     prof.direction = _mask_below(prof.direction, prof.intensity,
                                  intensity_min)

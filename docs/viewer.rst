@@ -98,7 +98,7 @@ Intensity filter
 ----------------
 
 Below the plot-type selector is the line
-**Filter (intensity <** *1.18* **)**: a checkbox and a value field. It
+**Filter (intensity <** *1.018* **)**: a checkbox and a value field. It
 is off by default. When it is checked, every data point whose
 intensity (SNR + 1) is below the value is left blank: intensity and
 beta in the scan histories, radial velocity and beta in the RHI
@@ -106,14 +106,15 @@ profile, and wind speed and direction for ``Processed_Wind_Profile``.
 
 ``Processed_Wind_Profile`` files carry no intensity of their own. The
 viewer reads it from the ``Wind_Profile`` scan file with the same
-timestamp in the same directory, converts each beam to height with its
-own elevation, and averages the beams at each profile level. If a
+timestamp in the same directory. Level *n* of the profile (given as a
+height) belongs to range gate *n* of the scan (given as a gate number);
+the intensity of that gate is averaged over all beams. If a
 profile has no matching ``Wind_Profile`` file, it is shown unfiltered
 and the status line below the browse buttons says so.
 
 Ticking or unticking the box reloads the plot. A changed value takes
 effect when you press Enter or leave the field. An invalid value is
-reported and replaced by the default 1.18. In Profile mode the current
+reported and replaced by the default 1.018. In Profile mode the current
 file stays selected. While the filter is on, the plot title ends with
 "(intensity < *value* removed)". The same filter is available as
 ``--filter`` in :doc:`cli` and ``filter=`` in :doc:`api`.

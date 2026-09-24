@@ -229,7 +229,7 @@ def plot_file(path: PathLike, *,
         size.
     :param filter: optional intensity filter. ``None``/``False`` (the \
         default) plots everything; ``True`` uses \
-        :data:`~haloviewer.data.DEFAULT_INTENSITY_FILTER` (1.18); a \
+        :data:`~haloviewer.data.DEFAULT_INTENSITY_FILTER` (1.018); a \
         number uses that threshold. Data points whose intensity \
         (SNR + 1) is below the threshold are shown as ``nan`` (blank) \
         -- intensity, beta and radial velocity for the scan kinds; \
@@ -520,7 +520,7 @@ def plot(path: Union[PathLike, Iterable[PathLike]], *,
         :func:`plot_file`.
     :param filter: optional intensity filter: ``None`` (default, off), \
         ``True`` (threshold \
-        :data:`~haloviewer.data.DEFAULT_INTENSITY_FILTER` = 1.18) or a \
+        :data:`~haloviewer.data.DEFAULT_INTENSITY_FILTER` = 1.018) or a \
         threshold value; see :func:`plot_file`.
     :returns: the :class:`~matplotlib.figure.Figure` that was drawn.
     :raises ValueError: if no files are found, if they span more than \

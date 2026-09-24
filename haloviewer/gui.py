@@ -35,7 +35,7 @@ Three range controls (Height, Distance, Speed -- see
 depends on the current plot kind (:meth:`HaloViewerApp.
 _update_range_controls_enabled`).
 
-An optional intensity filter ("Filter (intensity < [1.18])") blanks
+An optional intensity filter ("Filter (intensity < [1.018])") blanks
 every data point whose intensity is below the entered threshold; see
 :meth:`HaloViewerApp._intensity_min` and the ``intensity_min`` argument
 of the :mod:`haloviewer.data` loaders.
@@ -427,7 +427,7 @@ class HaloViewerApp:
         self.timeseries_radio.grid(row=0, column=1, sticky='w')
         row += 1
 
-        # -- intensity filter: [x] Filter (intensity < [1.18]) ------------
+        # -- intensity filter: [x] Filter (intensity < [1.018]) ------------
         filter_frame = ttk.Frame(parent)
         filter_frame.grid(row=row, column=0, sticky='w', pady=(0, 8))
         self.filter_var = tk.BooleanVar(value=False)

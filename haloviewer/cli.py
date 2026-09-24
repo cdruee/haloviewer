@@ -24,7 +24,7 @@ Examples::
     haloplot Proc/2026/202609 --kind RHI --start 24h --time \\
         "2026-09-19 12:00" --height 0 3000 -p rhi_24h.png
 
-    # hide low-signal data (intensity < 1.18, the default threshold)
+    # hide low-signal data (intensity < 1.018, the default threshold)
     haloplot Proc/2026/202609/20260919 -k VAD --filter True -p vad.png
 
     # open interactively instead of (or as well as) saving
