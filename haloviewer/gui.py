@@ -34,6 +34,11 @@ Three range controls (Height, Distance, Speed -- see
 :class:`_RangeControl`) sit in the left panel; which ones are enabled
 depends on the current plot kind (:meth:`HaloViewerApp.
 _update_range_controls_enabled`).
+
+An optional intensity filter ("Filter (intensity < [1.18])") blanks
+every data point whose intensity is below the entered threshold; see
+:meth:`HaloViewerApp._intensity_min` and the ``intensity_min`` argument
+of the :mod:`haloviewer.data` loaders.
 """
 
 from __future__ import annotations
@@ -347,6 +352,7 @@ class HaloViewerApp:
         self._last_series = None
         self._last_history = None
         self._last_rhi = None
+        self._kind_names: List[str] = []
 
         self._build_widgets()
         self._update_range_controls_enabled(None)
@@ -394,20 +400,15 @@ class HaloViewerApp:
                    command=self._pick_directory).grid(row=0, column=1, padx=(4, 0))
         row += 1
 
-        # -- kind list --------------------------------------------------
+        # -- file kind: a read-only drop-down (one line instead of a
+        # tall list box, to leave room for the other controls) ---------
         ttk.Label(parent, text='File kind').grid(row=row, column=0, sticky='w')
         row += 1
-        kind_frame = ttk.Frame(parent)
-        kind_frame.grid(row=row, column=0, sticky='nswe', pady=(0, 8))
-        kind_frame.columnconfigure(0, weight=1)
-        parent.rowconfigure(row, weight=1)
-        self.kind_list = tk.Listbox(kind_frame, height=8, exportselection=False)
-        self.kind_list.grid(row=0, column=0, sticky='nswe')
-        kind_scroll = ttk.Scrollbar(kind_frame, orient='vertical',
-                                     command=self.kind_list.yview)
-        kind_scroll.grid(row=0, column=1, sticky='ns')
-        self.kind_list.configure(yscrollcommand=kind_scroll.set)
-        self.kind_list.bind('<<ListboxSelect>>', self._on_kind_select)
+        self.kind_var = tk.StringVar()
+        self.kind_combo = ttk.Combobox(parent, textvariable=self.kind_var,
+                                        state='readonly', values=[])
+        self.kind_combo.grid(row=row, column=0, sticky='we', pady=(0, 8))
+        self.kind_combo.bind('<<ComboboxSelected>>', self._on_kind_select)
         row += 1
 
         # -- plot mode ----------------------------------------------------
@@ -424,6 +425,26 @@ class HaloViewerApp:
             mode_frame, text='History', value=TIMESERIES_MODE,
             variable=self.mode_var, command=self._on_mode_select)
         self.timeseries_radio.grid(row=0, column=1, sticky='w')
+        row += 1
+
+        # -- intensity filter: [x] Filter (intensity < [1.18]) ------------
+        filter_frame = ttk.Frame(parent)
+        filter_frame.grid(row=row, column=0, sticky='w', pady=(0, 8))
+        self.filter_var = tk.BooleanVar(value=False)
+        self.filter_check = ttk.Checkbutton(
+            filter_frame, text='Filter (intensity <', variable=self.filter_var,
+            command=self._on_filter_change)
+        self.filter_check.grid(row=0, column=0, sticky='w')
+        self.filter_value_var = tk.StringVar(
+            value=f'{_data.DEFAULT_INTENSITY_FILTER:g}')
+        self.filter_entry = ttk.Entry(
+            filter_frame, textvariable=self.filter_value_var, width=6)
+        self.filter_entry.grid(row=0, column=1, padx=(2, 0))
+        self.filter_entry.bind('<Return>', lambda e: self._on_filter_change())
+        self.filter_entry.bind('<FocusOut>',
+                               lambda e: self._on_filter_value_leave())
+        ttk.Label(filter_frame, text=')').grid(row=0, column=2, sticky='w')
+        self._applied_filter: Optional[float] = None
         row += 1
 
         # -- range controls: Height (vertical axis -- height for the
@@ -611,23 +632,25 @@ class HaloViewerApp:
         self.root.update_idletasks()
         self.scan_result = scan_directory(path)
 
-        self.kind_list.delete(0, tk.END)
         kinds = self.scan_result.kinds()
+        labels = []
         for kind in kinds:
             info = get_kind_info(kind)
             n = self.scan_result.count(kind)
             label = f'{kind}  ({n})'
             if not info.supported:
                 label = f'{label}  — not yet supported'
-            self.kind_list.insert(tk.END, label)
+            labels.append(label)
+        self.kind_combo.configure(values=labels)
         self._kind_names = kinds
 
         if kinds:
-            self.kind_list.selection_set(0)
+            self.kind_combo.current(0)
             self._select_kind(kinds[0])
             self.status_var.set(
                 f'Found {len(kinds)} file kind(s) under {path}.')
         else:
+            self.kind_var.set('')
             self.current_kind = None
             self.current_files = []
             self._update_range_controls_enabled(None)
@@ -639,11 +662,10 @@ class HaloViewerApp:
     # ------------------------------------------------------------------
 
     def _on_kind_select(self, _event=None) -> None:
-        sel = self.kind_list.curselection()
-        if not sel:
+        idx = self.kind_combo.current()
+        if idx < 0 or idx >= len(self._kind_names):
             return
-        kind = self._kind_names[sel[0]]
-        self._select_kind(kind)
+        self._select_kind(self._kind_names[idx])
 
     def _select_kind(self, kind: str) -> None:
         self.current_kind = kind
@@ -699,6 +721,10 @@ class HaloViewerApp:
         everything except the raw scan history, whose two panels are
         intensity and beta."""
         self.height_ctrl.set_enabled(plot_kind is not None)
+        self.filter_check.configure(
+            state='normal' if plot_kind is not None else 'disabled')
+        self.filter_entry.configure(
+            state='normal' if plot_kind is not None else 'disabled')
         self.distance_ctrl.set_enabled(plot_kind == 'rhi_profile')
         self.speed_ctrl.set_enabled(
             plot_kind in ('wind_profile', 'wind_timeseries', 'rhi_profile'))
@@ -812,6 +838,72 @@ class HaloViewerApp:
         elif plot_kind == 'rhi_profile':
             self._compute_rhi_profile_limits()
         self._draw_current()
+
+    # ------------------------------------------------------------------
+    # intensity filter
+    # ------------------------------------------------------------------
+
+    def _intensity_min(self) -> Optional[float]:
+        """The active intensity filter threshold, or ``None`` when the
+        Filter checkbox is off. An unparsable (or non-finite) value in
+        the field is reported and replaced by the default threshold."""
+        if not self.filter_var.get():
+            return None
+        text = self.filter_value_var.get().strip()
+        try:
+            value = float(text)
+            if not np.isfinite(value):
+                raise ValueError
+        except ValueError:
+            default = _data.DEFAULT_INTENSITY_FILTER
+            messagebox.showerror(
+                'HaloViewer',
+                f'Invalid filter value {text!r}; using the default '
+                f'{default:g}.')
+            self.filter_value_var.set(f'{default:g}')
+            value = default
+        return value
+
+    def _on_filter_value_leave(self) -> None:
+        """Leaving the value field applies a changed value (only if the
+        filter is on and the value actually differs from the one used
+        for the current plot, so tabbing through is free)."""
+        if not self.filter_var.get():
+            return
+        try:
+            value = float(self.filter_value_var.get())
+        except ValueError:
+            value = None
+        if value != self._applied_filter:
+            self._on_filter_change()
+
+    def _on_filter_change(self) -> None:
+        """Filter toggled or value entered: reload the current
+        selection with the new filter, keeping the file position in
+        Profile mode (the filter changes what is shown, not which
+        files are loaded)."""
+        if not self.current_files:
+            return
+        plot_kind = self._plot_kind()
+        if plot_kind == 'wind_profile':
+            self._compute_profile_limits()
+        elif plot_kind == 'rhi_profile':
+            self._compute_rhi_profile_limits()
+        self._draw_current()
+
+    def _title(self, title: str) -> str:
+        if self._applied_filter is None:
+            return title
+        return f'{title}  (intensity < {self._applied_filter:g} removed)'
+
+    def _filter_status(self, missing) -> str:
+        """Status-line note for Processed_Wind_Profile files the filter
+        could not be applied to (no Wind_Profile file alongside)."""
+        n = len(missing)
+        if not n:
+            return ''
+        return (f'\nFilter not applied to {n} profile(s): no matching '
+                f'Wind_Profile file.')
 
     # ------------------------------------------------------------------
     # navigation
@@ -932,6 +1024,7 @@ class HaloViewerApp:
     def _draw_current(self) -> None:
         """Load (from disk, if needed) and render whatever the current
         plot kind is."""
+        self._applied_filter = self._intensity_min()
         plot_kind = self._plot_kind()
         if plot_kind == 'wind_profile':
             self._draw_profile()
@@ -985,15 +1078,17 @@ class HaloViewerApp:
         the current file selection, so stepping through files with
         First/Back/Forward/Last never resizes the panels."""
         sample = _sample(self.current_files, _MAX_FILES_FOR_LIMITS)
+        intensity_min = self._intensity_min()
         speed_max = 1.0
         h_min, h_max = None, None
         for entry in sample:
             try:
-                prof = _data.load_profile(entry.path)
+                prof = _data.load_profile(
+                    entry.path, intensity_min=intensity_min)
             except (IOError, ValueError):
                 continue
-            if prof.speed.size:
-                speed_max = max(speed_max, float(pd.Series(prof.speed).max()))
+            if prof.speed.size and np.any(np.isfinite(prof.speed)):
+                speed_max = max(speed_max, float(np.nanmax(prof.speed)))
             if prof.height.size:
                 lo = float(prof.height.min())
                 hi = float(prof.height.max())
@@ -1016,14 +1111,18 @@ class HaloViewerApp:
             self._set_mode_figure('wind_profile')
         entry = self.current_files[self.current_index]
         try:
-            self._last_profile = _data.load_profile(entry.path)
+            self._last_profile = _data.load_profile(
+                entry.path, intensity_min=self._applied_filter)
         except (IOError, ValueError) as exc:
             self._show_message(f'Could not read {entry.path.name}:\n{exc}')
             return
         self._render_profile()
+        missing = ([self._last_profile.timestamp]
+                   if self._last_profile.filter_missing else [])
         self.status_var.set(
             f'{entry.path.name}\n'
-            f'File {self.current_index + 1} of {len(self.current_files)}')
+            f'File {self.current_index + 1} of {len(self.current_files)}'
+            + self._filter_status(missing))
 
     def _render_profile(self) -> None:
         """Redraw the profile plot from :attr:`_last_profile` and the
@@ -1035,7 +1134,8 @@ class HaloViewerApp:
         plotting.plot_wind_profile(
             ax_speed, ax_dir, prof.height, prof.speed, prof.direction,
             speed_xlim=self._speed_range, height_ylim=self._height_ylim,
-            title=f'{self.current_kind}  {prof.timestamp:%Y-%m-%d %H:%M:%S}')
+            title=self._title(
+                f'{self.current_kind}  {prof.timestamp:%Y-%m-%d %H:%M:%S}'))
         self.canvas.draw_idle()
         self._sync_height_fields_from_axes()
 
@@ -1062,13 +1162,16 @@ class HaloViewerApp:
         if len(files) > _MAX_FILES_FOR_TIMESERIES:
             files = _sample(files, _MAX_FILES_FOR_TIMESERIES)
         try:
-            self._last_series = _data.load_profile_series(e.path for e in files)
+            self._last_series = _data.load_profile_series(
+                (e.path for e in files), intensity_min=self._applied_filter)
         except (IOError, ValueError) as exc:
             self._show_message(f'Could not build history:\n{exc}')
             return
         self._compute_series_speed_range()
         self._render_timeseries()
-        self.status_var.set(f'{len(files)} file(s) in the selected range.')
+        self.status_var.set(
+            f'{len(files)} file(s) in the selected range.'
+            + self._filter_status(self._last_series.filter_missing))
 
     def _render_timeseries(self) -> None:
         """Redraw the timeseries plot from :attr:`_last_series` and the
@@ -1086,7 +1189,7 @@ class HaloViewerApp:
             ax_speed, ax_dir, cax_speed, cax_dir,
             series.times, series.height, series.speed, series.direction,
             height_ylim=self._height_ylim, speed_vlim=self._speed_range,
-            title=title)
+            title=self._title(title))
         self.canvas.draw_idle()
         self._sync_height_fields_from_axes()
 
@@ -1106,7 +1209,8 @@ class HaloViewerApp:
         if len(files) > _MAX_FILES_FOR_TIMESERIES:
             files = _sample(files, _MAX_FILES_FOR_TIMESERIES)
         try:
-            self._last_history = _data.load_scan_history(e.path for e in files)
+            self._last_history = _data.load_scan_history(
+                (e.path for e in files), intensity_min=self._applied_filter)
         except (IOError, ValueError) as exc:
             self._show_message(f'Could not build history:\n{exc}')
             return
@@ -1128,7 +1232,7 @@ class HaloViewerApp:
         plotting.plot_scan_history(
             ax_int, ax_beta, cax_int, cax_beta,
             hist.times, hist.distance, hist.intensity, hist.beta,
-            distance_ylim=self._height_ylim, title=title)
+            distance_ylim=self._height_ylim, title=self._title(title))
         self.canvas.draw_idle()
         self._sync_height_fields_from_axes()
 
@@ -1141,12 +1245,14 @@ class HaloViewerApp:
         sample of the current file selection, mirroring
         :meth:`_compute_profile_limits`."""
         sample = _sample(self.current_files, _MAX_FILES_FOR_LIMITS)
+        intensity_min = self._intensity_min()
         d_min, d_max = None, None
         h_min, h_max = None, None
         v_max = 1.0
         for entry in sample:
             try:
-                cross = _data.load_rhi_cross_section(entry.path)
+                cross = _data.load_rhi_cross_section(
+                    entry.path, intensity_min=intensity_min)
             except (IOError, ValueError):
                 continue
             if cross.distance.size:
@@ -1182,7 +1288,8 @@ class HaloViewerApp:
             self._set_mode_figure('rhi_profile')
         entry = self.current_files[self.current_index]
         try:
-            self._last_rhi = _data.load_rhi_cross_section(entry.path)
+            self._last_rhi = _data.load_rhi_cross_section(
+                entry.path, intensity_min=self._applied_filter)
         except (IOError, ValueError) as exc:
             self._show_message(f'Could not read {entry.path.name}:\n{exc}')
             return
@@ -1203,7 +1310,8 @@ class HaloViewerApp:
             cross.distance, cross.height, cross.velocity, cross.beta,
             distance_xlim=self._distance_xlim, height_ylim=self._height_ylim,
             speed_vlim=self._speed_range,
-            title=f'{self.current_kind}  {cross.timestamp:%Y-%m-%d %H:%M:%S}')
+            title=self._title(
+                f'{self.current_kind}  {cross.timestamp:%Y-%m-%d %H:%M:%S}'))
         self.canvas.draw_idle()
         self._sync_height_fields_from_axes()
 

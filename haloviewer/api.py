@@ -159,6 +159,27 @@ def _font_context(fontsize: Optional[float]):
             yield
 
 
+FilterArg = Union[None, bool, float, str]
+
+
+def _filter_title(title: str, intensity_min: Optional[float]) -> str:
+    """Append a note on the active intensity filter to a plot title."""
+    if intensity_min is None:
+        return title
+    return f'{title}  (intensity < {intensity_min:g} removed)'
+
+
+def _warn_filter_missing(missing, stacklevel: int = 3) -> None:
+    """Warn once if the intensity filter could not be applied to some
+    ``Processed_Wind_Profile`` files (no matching ``Wind_Profile``)."""
+    n = len(missing)
+    if n:
+        warnings.warn(
+            f'intensity filter not applied to {n} Processed_Wind_Profile '
+            f'file(s): no matching Wind_Profile file with the same '
+            f'timestamp found', stacklevel=stacklevel)
+
+
 def plot_file(path: PathLike, *,
               mode: Optional[str] = None,
               height: Optional[Tuple[float, float]] = None,
@@ -167,7 +188,8 @@ def plot_file(path: PathLike, *,
               output: Optional[PathLike] = None,
               show: bool = False,
               figsize: Optional[Tuple[float, float]] = None,
-              fontsize: Optional[float] = None) -> Figure:
+              fontsize: Optional[float] = None,
+              filter: FilterArg = None) -> Figure:
     """
     Plot a single Halo wind lidar file.
 
@@ -205,9 +227,20 @@ def plot_file(path: PathLike, *,
         :func:`_auto_fontsize`), working out to \
         :data:`BASE_FONTSIZE_AT_A4` (16) at the default A4-landscape \
         size.
+    :param filter: optional intensity filter. ``None``/``False`` (the \
+        default) plots everything; ``True`` uses \
+        :data:`~haloviewer.data.DEFAULT_INTENSITY_FILTER` (1.18); a \
+        number uses that threshold. Data points whose intensity \
+        (SNR + 1) is below the threshold are shown as ``nan`` (blank) \
+        -- intensity, beta and radial velocity for the scan kinds; \
+        wind speed and direction for ``Processed_Wind_Profile``, \
+        judged by the intensity of the ``Wind_Profile`` scan file with \
+        the same timestamp (a warning is issued for profiles that have \
+        none, which are then left unfiltered).
     :returns: the :class:`~matplotlib.figure.Figure` that was drawn.
     """
     path = Path(path)
+    intensity_min = _data.resolve_intensity_filter(filter)
     kind = _resolve_kind(path)
     if mode is None:
         info = get_kind_info(kind)
@@ -223,28 +256,36 @@ def plot_file(path: PathLike, *,
     if mode == TIMESERIES_MODE:
         return plot_files([path], mode=mode, height=height,
                            distance=distance, speed=speed, output=output,
-                           show=show, figsize=figsize, fontsize=fontsize)
+                           show=show, figsize=figsize, fontsize=fontsize,
+                           filter=intensity_min)
 
     fig = _new_figure(show, figsize)
     resolved_fontsize = fontsize if fontsize is not None else _auto_fontsize(figsize)
     with _font_context(resolved_fontsize):
         if mode == PROFILE_MODE and kind == 'Processed_Wind_Profile':
-            prof = _data.load_profile(path)
+            prof = _data.load_profile(path, intensity_min=intensity_min)
+            if prof.filter_missing:
+                _warn_filter_missing([prof.timestamp])
             fig, (ax_speed, ax_dir) = plotting.create_profile_figure(
                 figsize=figsize, fig=fig)
             plotting.plot_wind_profile(
                 ax_speed, ax_dir, prof.height, prof.speed, prof.direction,
                 speed_xlim=speed, height_ylim=height,
-                title=f'{kind}  {prof.timestamp:%Y-%m-%d %H:%M:%S}')
+                title=_filter_title(
+                    f'{kind}  {prof.timestamp:%Y-%m-%d %H:%M:%S}',
+                    intensity_min))
         elif mode == PROFILE_MODE and kind == 'RHI':
-            cross = _data.load_rhi_cross_section(path)
+            cross = _data.load_rhi_cross_section(
+                path, intensity_min=intensity_min)
             fig, (ax_vel, ax_beta, cax_vel, cax_beta) = \
                 plotting.create_timeseries_figure(figsize=figsize, fig=fig)
             plotting.plot_rhi_cross_section(
                 ax_vel, ax_beta, cax_vel, cax_beta,
                 cross.distance, cross.height, cross.velocity, cross.beta,
                 distance_xlim=distance, height_ylim=height, speed_vlim=speed,
-                title=f'{kind}  {cross.timestamp:%Y-%m-%d %H:%M:%S}')
+                title=_filter_title(
+                    f'{kind}  {cross.timestamp:%Y-%m-%d %H:%M:%S}',
+                    intensity_min))
         else:
             raise ValueError(f'mode {mode!r} is not supported for kind {kind!r}')
 
@@ -261,6 +302,7 @@ def plot_files(paths: Iterable[PathLike], *,
                 show: bool = False,
                 figsize: Optional[Tuple[float, float]] = None,
                 fontsize: Optional[float] = None,
+                filter: FilterArg = None,
                 fig: Optional[Figure] = None) -> Figure:
     """
     Plot several Halo wind lidar files of the same kind together as a
@@ -281,12 +323,15 @@ def plot_files(paths: Iterable[PathLike], *,
         :data:`DEFAULT_FIGSIZE` (A4 landscape) if omitted.
     :param fontsize: base font size for all text in the figure; see \
         :func:`plot_file`.
+    :param filter: optional intensity filter (``None``, ``True`` or a \
+        threshold); see :func:`plot_file`.
     :param fig: internal use (an already-created figure to draw into).
     :returns: the :class:`~matplotlib.figure.Figure` that was drawn.
     """
     paths = [Path(p) for p in paths]
     if not paths:
         raise ValueError('no files given')
+    intensity_min = _data.resolve_intensity_filter(filter)
     kinds = {_resolve_kind(p) for p in paths}
     if len(kinds) > 1:
         raise ValueError(f'files must all be the same kind, got {kinds}')
@@ -299,7 +344,8 @@ def plot_files(paths: Iterable[PathLike], *,
                 'pass exactly one file (got %d)' % len(paths))
         return plot_file(paths[0], mode=mode, height=height,
                           distance=distance, speed=speed, output=output,
-                          show=show, figsize=figsize, fontsize=fontsize)
+                          show=show, figsize=figsize, fontsize=fontsize,
+                          filter=intensity_min)
 
     _check_supported(kind, mode)
     _warn_if_inapplicable(kind, mode, distance=distance, speed=speed)
@@ -311,7 +357,9 @@ def plot_files(paths: Iterable[PathLike], *,
     resolved_fontsize = fontsize if fontsize is not None else _auto_fontsize(figsize)
     with _font_context(resolved_fontsize):
         if mode == TIMESERIES_MODE and kind == 'Processed_Wind_Profile':
-            series = _data.load_profile_series(paths)
+            series = _data.load_profile_series(
+                paths, intensity_min=intensity_min)
+            _warn_filter_missing(series.filter_missing)
             fig, (ax_speed, ax_dir, cax_speed, cax_dir) = \
                 plotting.create_timeseries_figure(figsize=figsize, fig=fig)
             title = kind
@@ -322,9 +370,11 @@ def plot_files(paths: Iterable[PathLike], *,
             plotting.plot_wind_timeseries(
                 ax_speed, ax_dir, cax_speed, cax_dir,
                 series.times, series.height, series.speed, series.direction,
-                height_ylim=height, speed_vlim=speed, title=title)
+                height_ylim=height, speed_vlim=speed,
+                title=_filter_title(title, intensity_min))
         elif mode == TIMESERIES_MODE and kind in _SCAN_HISTORY_KINDS:
-            hist = _data.load_scan_history(paths)
+            hist = _data.load_scan_history(paths,
+                                           intensity_min=intensity_min)
             fig, (ax_int, ax_beta, cax_int, cax_beta) = \
                 plotting.create_timeseries_figure(figsize=figsize, fig=fig)
             title = kind
@@ -335,7 +385,8 @@ def plot_files(paths: Iterable[PathLike], *,
             plotting.plot_scan_history(
                 ax_int, ax_beta, cax_int, cax_beta,
                 hist.times, hist.distance, hist.intensity, hist.beta,
-                distance_ylim=height, title=title)
+                distance_ylim=height,
+                title=_filter_title(title, intensity_min))
         else:
             raise ValueError(
                 f'mode {mode!r} is not supported for multiple files of kind '
@@ -423,7 +474,8 @@ def plot(path: Union[PathLike, Iterable[PathLike]], *,
          output: Optional[PathLike] = None,
          show: bool = False,
          figsize: Optional[Tuple[float, float]] = None,
-         fontsize: Optional[float] = None) -> Figure:
+         fontsize: Optional[float] = None,
+         filter: FilterArg = None) -> Figure:
     """
     High-level entry point: resolve ``path``, pick the file kind and
     time range, and plot it. This is what :mod:`haloviewer.cli`
@@ -466,11 +518,17 @@ def plot(path: Union[PathLike, Iterable[PathLike]], *,
     :param fontsize: base font size for all text in the figure; if \
         omitted, scales proportionally with ``figsize`` -- see \
         :func:`plot_file`.
+    :param filter: optional intensity filter: ``None`` (default, off), \
+        ``True`` (threshold \
+        :data:`~haloviewer.data.DEFAULT_INTENSITY_FILTER` = 1.18) or a \
+        threshold value; see :func:`plot_file`.
     :returns: the :class:`~matplotlib.figure.Figure` that was drawn.
     :raises ValueError: if no files are found, if they span more than \
         one kind and ``kind`` wasn't given, if ``kind`` matches none \
         of them, or if none fall in the requested time range.
     """
+    # validate early, before any file is touched
+    intensity_min = _data.resolve_intensity_filter(filter)
     candidates = _resolve_candidate_paths(path)
 
     parsed = []
@@ -542,7 +600,8 @@ def plot(path: Union[PathLike, Iterable[PathLike]], *,
     paths_out = [p for p, _, _ in in_range]
     common_kwargs = dict(mode=norm_mode, height=height, distance=distance,
                           speed=speed, output=output, show=show,
-                          figsize=figsize, fontsize=fontsize)
+                          figsize=figsize, fontsize=fontsize,
+                          filter=intensity_min)
     if len(paths_out) == 1:
         return plot_file(paths_out[0], **common_kwargs)
     return plot_files(paths_out, **common_kwargs)

@@ -21,24 +21,26 @@ Window layout
 -------------
 
 Layout: a settings panel on the left (root directory picker, file-kind
-list, plot-type selector, Height/Distance/Speed range controls,
-start/end time range with quick presets, First/Back/Forward/Last
-browse buttons) and the plot on the right, with the standard
-matplotlib navigation toolbar (zoom/pan/save) underneath it. The root
-directory can be the ``Proc`` folder itself or any directory below it
-(e.g. a single year, month, or day); the tree is rescanned whenever a
-new directory is picked or typed in and confirmed with Enter.
+drop-down, plot-type selector, intensity filter, Height/Distance/Speed
+range controls, start/end time range with quick presets,
+First/Back/Forward/Last browse buttons) and the plot on the right, with
+the standard matplotlib navigation toolbar (zoom/pan/save) underneath
+it. The root directory can be the ``Proc`` folder itself or any
+directory below it (e.g. a single year, month, or day); the tree is
+rescanned whenever a new directory is picked or typed in and confirmed
+with Enter.
 
 Kinds and plot modes
 --------------------
 
-The file-kind list shows every kind found below the root directory.
-Kinds the viewer cannot plot yet (e.g. ``User1`` ... ``User5``) are
-still listed, so you can see what is in the tree, but selecting them
-only shows a "not yet supported" message. The plot-type selector
-switches between **Profile** (a single scan) and **History** (all files
-in the selected time range combined into one time/height image).
-Whichever mode a kind doesn't support is greyed out.
+The file-kind drop-down lists every kind found below the root
+directory, with the number of files of each kind. Kinds the viewer
+cannot plot yet (e.g. ``User1`` ... ``User5``) are still listed, so you
+can see what is in the tree, but selecting them only shows a "not yet
+supported" message. The plot-type selector switches between
+**Profile** (a single scan) and **History** (all files in the selected
+time range combined into one time/height image). Whichever mode a kind
+doesn't support is greyed out.
 
 Processed_Wind_Profile
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -92,6 +94,30 @@ RHI
 -  **History** mode is the same raw intensity/beta scan history
    described above for VAD/Stare/Wind_Profile.
 
+Intensity filter
+----------------
+
+Below the plot-type selector is the line
+**Filter (intensity <** *1.18* **)**: a checkbox and a value field. It
+is off by default. When it is checked, every data point whose
+intensity (SNR + 1) is below the value is left blank: intensity and
+beta in the scan histories, radial velocity and beta in the RHI
+profile, and wind speed and direction for ``Processed_Wind_Profile``.
+
+``Processed_Wind_Profile`` files carry no intensity of their own. The
+viewer reads it from the ``Wind_Profile`` scan file with the same
+timestamp in the same directory, converts each beam to height with its
+own elevation, and averages the beams at each profile level. If a
+profile has no matching ``Wind_Profile`` file, it is shown unfiltered
+and the status line below the browse buttons says so.
+
+Ticking or unticking the box reloads the plot. A changed value takes
+effect when you press Enter or leave the field. An invalid value is
+reported and replaced by the default 1.18. In Profile mode the current
+file stays selected. While the filter is on, the plot title ends with
+"(intensity < *value* removed)". The same filter is available as
+``--filter`` in :doc:`cli` and ``filter=`` in :doc:`api`.
+
 Height, Distance and Speed ranges
 ---------------------------------
 
@@ -138,22 +164,19 @@ Browsing files and time windows
 -------------------------------
 
 The **First/Back/Forward/Last** buttons have two meanings, depending on
-the plot mode and the active time preset.
+the active time preset.
 
-In **Profile** mode (Processed Wind Profile and RHI) they always step
-through the individual files loaded for the current [Start, End]
-window, one at a time, whatever preset is selected: First/Last jump to
-the first/last file, Back/Forward move one file.
-
-In **History** mode, with a fixed-length preset active, they instead
-move the whole [Start, End] window (under Custom they are disabled in
-History mode, since the whole selection is already on screen). First
-jumps the window to the true start of this kind's data; Last jumps it
-to the true end. Back/Forward shift the window by exactly one interval;
-the resulting End time is snapped to a grid of interval-length
-multiples anchored at the start of its year (e.g. with 24h selected,
-End always lands on a whole day-since-Jan-1 boundary), so repeated
-stepping can't drift off round numbers the way plain addition would.
+With a fixed-length preset active, **Browse files** changes meaning:
+instead of stepping through individual files, First/Back/Forward/Last
+move the whole [Start, End] window, and stay active in both Profile and
+History mode (under Custom they only step files, one at a time, and
+only in Profile mode, as before). First jumps the window to the true
+start of this kind's data; Last jumps it to the true end. Back/Forward
+shift the window by exactly one interval; the resulting End time is
+snapped to a grid of interval-length multiples anchored at the start of
+its year (e.g. with 24h selected, End always lands on a whole
+day-since-Jan-1 boundary), so repeated stepping can't drift off round
+numbers the way plain addition would.
 
 Zooming and panning
 -------------------
@@ -205,11 +228,15 @@ Troubleshooting
   Linux distributions Tkinter is a separate OS package (e.g.
   ``sudo apt install python3-tk``). The conda environment already
   contains it.
-* **A kind is missing from the list.** Only files whose names follow
-  the Halo convention
+* **A kind is missing from the drop-down.** Only files whose names
+  follow the Halo convention
   ``<Type words>_<system id>_<yyyymmdd>_<hhmmss>.hpl`` are recognised.
   Other files in the tree are ignored.
 * **Some files of a History are skipped.** Truncated files (e.g. a scan
   that was still being written when it was copied) are read up to their
   last complete ray. Unreadable files are skipped with a warning
   instead of blanking the whole plot.
+* **The filter has no effect on a wind profile.** The matching
+  ``Wind_Profile_<id>_<date>_<time>.hpl`` file must sit in the same
+  directory as the ``Processed_Wind_Profile`` file and have exactly the
+  same timestamp in its name.

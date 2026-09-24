@@ -24,6 +24,9 @@ Examples::
     haloplot Proc/2026/202609 --kind RHI --start 24h --time \\
         "2026-09-19 12:00" --height 0 3000 -p rhi_24h.png
 
+    # hide low-signal data (intensity < 1.18, the default threshold)
+    haloplot Proc/2026/202609/20260919 -k VAD --filter True -p vad.png
+
     # open interactively instead of (or as well as) saving
     haloplot some_file.hpl --show
 
@@ -39,9 +42,20 @@ import warnings
 from typing import List, Optional
 
 from . import api
+from . import data as _data
 
 #: Output filename used when neither -p/--plot nor --show is given.
 DEFAULT_OUTPUT = 'plot.png'
+
+
+def _filter_value(text: str):
+    """argparse ``type`` for ``--filter``: ``True`` (any case) selects
+    the default threshold, anything else must be a number."""
+    try:
+        return _data.resolve_intensity_filter(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f'expected "True" or a number, got {text!r}') from None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -86,6 +100,13 @@ def build_parser() -> argparse.ArgumentParser:
         '--speed', nargs=2, type=float, metavar=('MIN', 'MAX'),
         help='fix the wind-speed/velocity axis or colour range '
              '(deselects autoscale; warns if not applicable)')
+    parser.add_argument(
+        '--filter', dest='filter', type=_filter_value, metavar='VALUE',
+        help='hide data points whose intensity (SNR + 1) is below VALUE '
+             '(shown blank). "True" selects the default threshold '
+             '(%g). For Processed_Wind_Profile, the intensity comes from '
+             'the Wind_Profile file with the same timestamp'
+             % _data.DEFAULT_INTENSITY_FILTER)
     parser.add_argument(
         '-p', '--plot', dest='output', metavar='PATH',
         help='save the figure to PATH (format inferred from the '
@@ -133,6 +154,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         kwargs['speed'] = tuple(args.speed)
     if args.figsize is not None:
         kwargs['figsize'] = tuple(args.figsize)
+    if args.filter is not None:
+        kwargs['filter'] = args.filter
 
     try:
         with warnings.catch_warnings(record=True) as caught:

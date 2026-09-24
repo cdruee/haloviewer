@@ -11,7 +11,8 @@ knowing about the other's concerns (file format vs. rendering).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import warnings
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
@@ -23,11 +24,85 @@ from . import hpl
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    'DEFAULT_INTENSITY_FILTER', 'resolve_intensity_filter',
+    'find_wind_profile_file', 'load_wind_profile_intensity',
     'ProfileData', 'ProfileSeriesData',
     'load_profile', 'load_profile_series',
     'ScanHistoryData', 'load_scan_history',
     'RhiCrossSectionData', 'load_rhi_cross_section',
 ]
+
+
+# =========================================================================
+# Optional intensity filter
+# =========================================================================
+
+#: Default threshold for the optional intensity filter (intensity is
+#: the instrument's SNR + 1): data points whose intensity is *below*
+#: this value are replaced by ``nan``. Used whenever the filter is
+#: switched on without an explicit value (``filter=True`` in
+#: :func:`haloviewer.plot <haloviewer.api.plot>`, ``--filter True`` in
+#: ``haloplot``, and the initial value of the GUI's filter field).
+DEFAULT_INTENSITY_FILTER: float = 1.18
+
+_TRUE_WORDS = {'true', 'yes', 'on', 'default'}
+_FALSE_WORDS = {'false', 'no', 'off', 'none', ''}
+
+
+def resolve_intensity_filter(value) -> Optional[float]:
+    """
+    Turn the user-facing ``filter`` setting into a numeric intensity
+    threshold, or ``None`` for "no filtering".
+
+    * ``None`` or ``False`` -> ``None`` (filter off).
+    * ``True`` -> :data:`DEFAULT_INTENSITY_FILTER`.
+    * a number -> that number.
+    * a string (as typed on the command line): ``"true"``/``"yes"``/
+      ``"on"``/``"default"`` (any case) -> the default threshold,
+      ``"false"``/``"no"``/``"off"``/``"none"`` -> ``None``, anything
+      else is parsed as a number.
+
+    :raises ValueError: if the value is not one of the above, or not a \
+        finite number.
+    """
+    if value is None or value is False:
+        return None
+    if value is True:
+        return DEFAULT_INTENSITY_FILTER
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in _TRUE_WORDS:
+            return DEFAULT_INTENSITY_FILTER
+        if word in _FALSE_WORDS:
+            return None
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f'filter must be None, True/False or a number, got {value!r}'
+        ) from None
+    if not np.isfinite(threshold):
+        raise ValueError(f'filter threshold must be finite, got {value!r}')
+    return threshold
+
+
+def _mask_below(values: np.ndarray, intensity: np.ndarray,
+                 intensity_min: Optional[float]) -> np.ndarray:
+    """``values`` with every element whose ``intensity`` is below
+    ``intensity_min`` replaced by ``nan`` (a copy; the input is left
+    alone). Points with no intensity at all (``nan``) are kept -- there
+    is nothing to decide on. ``intensity_min`` of ``None`` returns
+    ``values`` unchanged."""
+    values = np.asarray(values, dtype=float)
+    if intensity_min is None:
+        return values
+    with np.errstate(invalid='ignore'):
+        below = np.asarray(intensity, dtype=float) < intensity_min
+    if not below.any():
+        return values
+    out = values.copy()
+    out[below] = np.nan
+    return out
 
 
 @dataclass
@@ -39,13 +114,94 @@ class ProfileData:
     speed: np.ndarray
     direction: np.ndarray
     path: Path
+    #: Intensity (SNR + 1) at each ``height``, taken from the matching
+    #: ``Wind_Profile`` scan file (see :func:`load_wind_profile_intensity`).
+    #: Only filled in when the intensity filter was requested; ``None``
+    #: if it wasn't, or if no matching scan file was found (in which
+    #: case speed/direction are left unfiltered).
+    intensity: Optional[np.ndarray] = None
+    #: ``True`` if the intensity filter was requested but could not be
+    #: applied (no matching ``Wind_Profile`` file).
+    filter_missing: bool = False
 
 
-def load_profile(path) -> ProfileData:
+def find_wind_profile_file(path) -> Optional[Path]:
+    """
+    The raw ``Wind_Profile`` scan file a ``Processed_Wind_Profile`` file
+    was derived from: same directory, same system id, same timestamp
+    (``Processed_Wind_Profile_77_20260919_121707.hpl`` ->
+    ``Wind_Profile_77_20260919_121707.hpl``).
+
+    :returns: its path, or ``None`` if ``path`` isn't a \
+        ``Processed_Wind_Profile`` file or no such scan file exists.
+    """
+    path = Path(path)
+    prefix = 'Processed_Wind_Profile_'
+    if not path.name.startswith(prefix):
+        return None
+    candidate = path.with_name('Wind_Profile_' + path.name[len(prefix):])
+    return candidate if candidate.is_file() else None
+
+
+def load_wind_profile_intensity(path, height: np.ndarray) -> np.ndarray:
+    """
+    Intensity (SNR + 1) of a ``Wind_Profile`` scan file at the given
+    ``height`` levels (m), for filtering the matching processed profile.
+
+    Every ray (beam) of the scan is converted from range gates to
+    height with its own tilt-corrected elevation (see
+    :func:`_tilt_corrected_unit_components`), its intensity is
+    interpolated linearly onto ``height``, and the result is averaged
+    over all rays -- the same "one value per level from all beams" that
+    the processed profile itself represents. A level more than one gate
+    below the lowest or above the highest gate of a ray gets no value
+    from that ray; a level no ray covers is ``nan``.
+
+    :raises ValueError: if the file contains no usable ray data.
+    """
+    height = np.asarray(height, dtype=float)
+    f = hpl.DataFile(str(path))
+    if not f.rays:
+        raise ValueError(f'{path} contains no scan (ray) data')
+    gate_length = float(f.header.get('gatelength') or 1.0) if f.header else 1.0
+
+    per_ray: List[np.ndarray] = []
+    for r in f.rays:
+        ng = len(r.data.index)
+        if ng == 0:
+            continue
+        _horiz, vert = _tilt_corrected_unit_components(
+            r.azimuth, r.elevation, r.pitch, r.roll)
+        if vert <= 0:
+            continue  # a beam at/below the horizon has no height axis
+        gate_height = _gate_distance_axis(gate_length, ng) * vert
+        inten = pd.to_numeric(r.data['Intensity'], errors='coerce').to_numpy()
+        ok = np.isfinite(inten)
+        if not ok.any():
+            continue
+        h_ok, i_ok = gate_height[ok], inten[ok]
+        values = np.interp(height, h_ok, i_ok)
+        step = gate_length * vert
+        values[(height < h_ok[0] - step) | (height > h_ok[-1] + step)] = np.nan
+        per_ray.append(values)
+    if not per_ray:
+        raise ValueError(f'{path} contains no usable intensity data')
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)  # all-nan levels
+        return np.nanmean(np.vstack(per_ray), axis=0)
+
+
+def load_profile(path, intensity_min: Optional[float] = None) -> ProfileData:
     """
     Load a single ``Processed_Wind_Profile_*.hpl`` file.
 
     :param path: path to the file.
+    :param intensity_min: optional intensity filter threshold: speed \
+        and direction at levels where the matching ``Wind_Profile`` \
+        scan (:func:`find_wind_profile_file`) has an intensity below \
+        this value are set to ``nan``. If that scan file doesn't exist \
+        or can't be read, a warning is logged, the profile is returned \
+        unfiltered and :attr:`ProfileData.filter_missing` is set.
     :raises ValueError: if the file does not contain processed profile \
         data (i.e. it is a regular scan file, not the header-less \
         "Processed Wind Profile" variant).
@@ -57,13 +213,34 @@ def load_profile(path) -> ProfileData:
             f'{path} does not contain Processed Wind Profile data '
             f'(got scan type {d.type!r})')
     df = d.profile.sort_index()
-    return ProfileData(
+    prof = ProfileData(
         timestamp=d.timestamp,
         height=df.index.to_numpy(dtype=float),
         speed=df['speed'].to_numpy(dtype=float),
         direction=df['direction'].to_numpy(dtype=float),
         path=path,
     )
+    if intensity_min is None:
+        return prof
+
+    wp_path = find_wind_profile_file(path)
+    if wp_path is None:
+        logger.warning('%s: no matching Wind_Profile file found -- '
+                       'intensity filter not applied', path.name)
+        prof.filter_missing = True
+        return prof
+    try:
+        prof.intensity = load_wind_profile_intensity(wp_path, prof.height)
+    except (IOError, ValueError) as exc:
+        logger.warning('%s: could not read intensity from %s (%s) -- '
+                       'intensity filter not applied',
+                       path.name, wp_path.name, exc)
+        prof.filter_missing = True
+        return prof
+    prof.speed = _mask_below(prof.speed, prof.intensity, intensity_min)
+    prof.direction = _mask_below(prof.direction, prof.intensity,
+                                 intensity_min)
+    return prof
 
 
 @dataclass
@@ -76,11 +253,15 @@ class ProfileSeriesData:
     :ivar height: common height grid (row labels of the grids).
     :ivar speed: ``(n_height, n_time)`` array of wind speed.
     :ivar direction: ``(n_height, n_time)`` array of wind direction.
+    :ivar filter_missing: timestamps of the profiles for which an \
+        intensity filter was requested but could not be applied (no \
+        matching ``Wind_Profile`` file); empty otherwise.
     """
     times: pd.DatetimeIndex
     height: np.ndarray
     speed: np.ndarray
     direction: np.ndarray
+    filter_missing: List[pd.Timestamp] = field(default_factory=list)
 
 
 def _canonical_height_grid(profiles: List[ProfileData]) -> np.ndarray:
@@ -134,7 +315,9 @@ def _interp_circular(height_grid: np.ndarray, height: np.ndarray,
     return np.degrees(np.arctan2(v, u)) % 360.0
 
 
-def load_profile_series(paths: Iterable) -> ProfileSeriesData:
+def load_profile_series(paths: Iterable,
+                        intensity_min: Optional[float] = None
+                        ) -> ProfileSeriesData:
     """
     Load and combine multiple processed wind profile files into a
     single height-by-time series suitable for a time-height plot.
@@ -158,13 +341,15 @@ def load_profile_series(paths: Iterable) -> ProfileSeriesData:
     file out of many doesn't blank the whole plot.
 
     :param paths: iterable of file paths.
+    :param intensity_min: optional intensity filter threshold, applied \
+        to each profile before interpolation; see :func:`load_profile`.
     :raises ValueError: if ``paths`` is empty, or none of them could \
         be loaded.
     """
     profiles: List[ProfileData] = []
     for p in paths:
         try:
-            profiles.append(load_profile(p))
+            profiles.append(load_profile(p, intensity_min=intensity_min))
         except (IOError, ValueError) as exc:
             logger.warning('skipping %s: %s', p, exc)
     if not profiles:
@@ -185,6 +370,7 @@ def load_profile_series(paths: Iterable) -> ProfileSeriesData:
     return ProfileSeriesData(
         times=pd.DatetimeIndex(times), height=height,
         speed=speed, direction=direction,
+        filter_missing=[p.timestamp for p in profiles if p.filter_missing],
     )
 
 
@@ -301,7 +487,9 @@ def _pick_history_bin_seconds(span_seconds: float) -> float:
                       key=lambda c: abs(np.log(c / target))))
 
 
-def load_scan_history(paths: Iterable) -> ScanHistoryData:
+def load_scan_history(paths: Iterable,
+                      intensity_min: Optional[float] = None
+                      ) -> ScanHistoryData:
     """
     Build a time-binned intensity/beta history from one or more regular
     scan files (VAD, Stare, RHI or Wind_Profile) -- the counterpart to
@@ -326,6 +514,10 @@ def load_scan_history(paths: Iterable) -> ScanHistoryData:
     file among many doesn't blank the whole plot.
 
     :param paths: iterable of file paths (regular scan ``.hpl`` files).
+    :param intensity_min: optional intensity filter threshold: gates \
+        whose intensity is below it are dropped (both their intensity \
+        and their beta) *before* time binning, so a bin that only held \
+        such gates ends up ``nan``.
     :raises ValueError: if none of the files could be loaded, or none \
         of the ones that did contain any ray data.
     """
@@ -369,6 +561,9 @@ def load_scan_history(paths: Iterable) -> ScanHistoryData:
             j = min(max(j, 0), n_bins - 1)
             inten = pd.to_numeric(r.data['Intensity'], errors='coerce').to_numpy()
             beta = pd.to_numeric(r.data['Beta'], errors='coerce').to_numpy()
+            if intensity_min is not None:
+                beta = _mask_below(beta, inten, intensity_min)
+                inten = _mask_below(inten, inten, intensity_min)
             ok_i = np.isfinite(inten)
             sum_i[:ng, j] += np.where(ok_i, inten, 0.0)
             cnt_i[:ng, j] += ok_i
@@ -403,9 +598,12 @@ class RhiCrossSectionData:
     velocity: np.ndarray
     beta: np.ndarray
     path: Path
+    #: intensity (SNR + 1) of every point, unfiltered
+    intensity: Optional[np.ndarray] = None
 
 
-def load_rhi_cross_section(path) -> RhiCrossSectionData:
+def load_rhi_cross_section(path, intensity_min: Optional[float] = None
+                           ) -> RhiCrossSectionData:
     """
     Load a single RHI scan file and compute its distance/height cross
     section: horizontal distance and height for every range gate of
@@ -414,6 +612,10 @@ def load_rhi_cross_section(path) -> RhiCrossSectionData:
     radial velocity (Doppler) and backscatter (beta).
 
     :param path: path to an ``RHI_*.hpl`` file.
+    :param intensity_min: optional intensity filter threshold: \
+        velocity and beta of points whose intensity is below it are \
+        set to ``nan`` (the points keep their position, so the arrays \
+        stay aligned).
     :raises ValueError: if the file contains no ray (scan) data.
     """
     path = Path(path)
@@ -426,6 +628,7 @@ def load_rhi_cross_section(path) -> RhiCrossSectionData:
     heights: List[np.ndarray] = []
     velocities: List[np.ndarray] = []
     betas: List[np.ndarray] = []
+    intensities: List[np.ndarray] = []
     for r in f.rays:
         ng = len(r.data.index)
         if ng == 0:
@@ -439,12 +642,19 @@ def load_rhi_cross_section(path) -> RhiCrossSectionData:
             pd.to_numeric(r.data['Doppler'], errors='coerce').to_numpy())
         betas.append(
             pd.to_numeric(r.data['Beta'], errors='coerce').to_numpy())
+        intensities.append(
+            pd.to_numeric(r.data['Intensity'], errors='coerce').to_numpy())
 
+    def _cat(parts: List[np.ndarray]) -> np.ndarray:
+        return np.concatenate(parts).astype(float) if parts else np.array([])
+
+    intensity = _cat(intensities)
     return RhiCrossSectionData(
         timestamp=f.timestamp,
-        distance=np.concatenate(distances) if distances else np.array([]),
-        height=np.concatenate(heights) if heights else np.array([]),
-        velocity=np.concatenate(velocities) if velocities else np.array([]),
-        beta=np.concatenate(betas) if betas else np.array([]),
+        distance=_cat(distances),
+        height=_cat(heights),
+        velocity=_mask_below(_cat(velocities), intensity, intensity_min),
+        beta=_mask_below(_cat(betas), intensity, intensity_min),
         path=path,
+        intensity=intensity,
     )

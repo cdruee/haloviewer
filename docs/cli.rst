@@ -15,7 +15,7 @@ Synopsis
 
    haloplot FILE [FILE ...] [-k KIND] [--mode {profile,history}]
             [-s START] [-t TIME] [--height MIN MAX] [--dist MIN MAX]
-            [--speed MIN MAX] [-p PATH] [--show]
+            [--speed MIN MAX] [--filter VALUE] [-p PATH] [--show]
             [--figsize WIDTH HEIGHT] [--verbose]
 
 How the plot is chosen
@@ -100,6 +100,33 @@ them instead, each taking a minimum and a maximum:
 If ``--dist`` or ``--speed`` don't apply to the selected kind and mode,
 ``haloplot`` prints a warning and ignores them.
 
+Intensity filter
+----------------
+
+Low-signal data can be hidden with the intensity filter. It is off by
+default. ``--filter VALUE`` blanks every data point whose intensity
+(SNR + 1) is below ``VALUE``. ``--filter True`` uses the default
+threshold of 1.18 (:data:`haloviewer.data.DEFAULT_INTENSITY_FILTER`).
+Anything else that isn't a number is an error.
+
+What gets blanked depends on the kind:
+
+* ``VAD``, ``Stare``, ``Wind_Profile`` and ``RHI`` history: intensity
+  and beta of every gate below the threshold. The gates are dropped
+  before time binning, so a bin that only held such gates stays blank.
+* ``RHI`` profile: radial velocity and beta of those points.
+* ``Processed_Wind_Profile`` (profile and history): wind speed and
+  direction. These files carry no intensity of their own, so it is
+  taken from the ``Wind_Profile`` scan file with the same system id and
+  timestamp in the same directory. Every beam of that scan is
+  converted to height with its own elevation, its intensity is
+  interpolated to the profile's heights, and the beams are averaged. A
+  profile without a matching ``Wind_Profile`` file is plotted
+  unfiltered, and a warning says how many were affected.
+
+When the filter is on, the plot title ends with
+``(intensity < VALUE removed)``.
+
 Output
 ------
 
@@ -122,8 +149,9 @@ or larger for other sizes, so text keeps the same relative size.
 Messages and exit status
 ------------------------
 
-Advisory messages (skipped files, options that don't apply) are printed
-to standard error as ``warning: ...`` lines, and the plot is still made.
+Advisory messages (skipped files, options that don't apply, profiles
+the intensity filter couldn't be applied to) are printed to standard
+error as ``warning: ...`` lines, and the plot is still made.
 Problems that prevent a plot (no files found, ambiguous kind, empty time
 range, unsupported kind/mode) are printed as ``error: ...`` and the exit
 status is 1. ``--verbose`` additionally prints debug logging, e.g. about
@@ -158,6 +186,12 @@ Examples
    # fix axis ranges instead of autoscaling (--dist/--speed warn, but
    # don't fail, if they don't apply to the selected kind/mode)
    haloplot some_profile.hpl --height 0 3000 --speed 0 20 -p profile.png
+
+   # hide low-signal data: "True" uses the default threshold 1.18,
+   # or give a threshold of your own
+   haloplot Proc/2026/202609/20260919 --kind VAD --filter True -p vad.png
+   haloplot Proc/2026/202609/20260919 --kind Processed_Wind_Profile \
+       --filter 1.05 -p wind_filtered.png
 
    # open interactively instead of saving
    haloplot some_file.hpl --show
