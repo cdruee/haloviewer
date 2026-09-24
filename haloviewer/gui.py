@@ -6,7 +6,7 @@ Tkinter desktop application for browsing Halo wind lidar ``Proc`` data.
 
 Tkinter is used because it ships with the standard ``python`` conda
 package on Linux, macOS and Windows (via its ``tk`` dependency), so a
-plain ``conda install numpy pandas matplotlib`` (see
+plain ``conda install numpy pandas matplotlib scipy`` (see
 ``environment.yml``) is enough to run this GUI -- no extra GUI toolkit
 package is needed.
 
@@ -16,8 +16,8 @@ This module only wires widgets to the pure functions in
 own (see those modules' docstrings), and no file-format knowledge (see
 :mod:`haloviewer.hpl`).
 
-Four (kind, mode) combinations are plottable, each routed to its own
-load/render pair (see :meth:`HaloViewerApp._plot_kind`):
+Five (kind, plot type) combinations are plottable, each routed to its
+own load/render pair (see :meth:`HaloViewerApp._plot_kind`):
 
 * ``wind_profile`` -- ``Processed_Wind_Profile`` + Profile: one file's
   height/speed/direction profile.
@@ -26,19 +26,26 @@ load/render pair (see :meth:`HaloViewerApp._plot_kind`):
 * ``scan_history`` -- VAD/Stare/Wind_Profile/RHI + History: many
   files' distance/time intensity+beta image (raw scans have no
   instrument-processed profile of their own).
-* ``rhi_profile`` -- RHI + Profile: one scan's distance/height cross
-  section (radial velocity + beta), the only other kind with a Profile
-  mode.
+* ``rhi`` -- VAD/Stare/Wind_Profile/RHI + RHI: one scan's points
+  (radial velocity + beta, side by side) projected onto the vertical
+  x/z plane, x pointing horizontally along the azimuth of the scan's
+  first ray (see :class:`haloviewer.data.ScanPointsData`).
+* ``ppi`` -- VAD/Stare/Wind_Profile/RHI + PPI: the same points
+  projected onto the horizontal x/y plane.
 
 Three range controls (Height, Distance, Speed -- see
 :class:`_RangeControl`) sit in the left panel; which ones are enabled
 depends on the current plot kind (:meth:`HaloViewerApp.
-_update_range_controls_enabled`).
+_update_range_controls_enabled`). In the PPI view the Distance
+control's near end is fixed at 0 and its far end sets both axes to
+``[-far, +far]``.
 
 An optional intensity filter ("Filter (intensity < [1.018])") blanks
 every data point whose intensity is below the entered threshold; see
 :meth:`HaloViewerApp._intensity_min` and the ``intensity_min`` argument
-of the :mod:`haloviewer.data` loaders.
+of the :mod:`haloviewer.data` loaders. The "Fill" checkbox next to it
+(RHI/PPI only) fills the area between the data points by
+nearest-neighbour interpolation instead of drawing individual dots.
 """
 
 from __future__ import annotations
@@ -57,7 +64,8 @@ from matplotlib.backends.backend_tkagg import (FigureCanvasTkAgg,
 
 from . import data as _data
 from . import plotting
-from .scan import (PROFILE_MODE, TIMESERIES_MODE, FileEntry, ScanResult,
+from .scan import (PPI_MODE, PROFILE_MODE, RHI_MODE, SINGLE_SCAN_MODES,
+                    TIMESERIES_MODE, FileEntry, ScanResult,
                     get_kind_info, scan_directory)
 
 _TIME_FMT = '%Y-%m-%d %H:%M:%S'
@@ -68,6 +76,19 @@ _TIME_FMT = '%Y-%m-%d %H:%M:%S'
 # representative min/max in practice.
 _MAX_FILES_FOR_LIMITS = 300
 _MAX_FILES_FOR_TIMESERIES = 4000
+
+#: Plot type radio buttons, in display order: (mode key, label).
+_MODE_BUTTONS = [
+    (PROFILE_MODE, 'Profile'),
+    (TIMESERIES_MODE, 'History'),
+    (RHI_MODE, 'RHI'),
+    (PPI_MODE, 'PPI'),
+]
+
+#: Plot kinds that show one file at a time (browsed file by file).
+_SINGLE_SCAN_PLOT_KINDS = ('wind_profile', 'rhi', 'ppi')
+#: Plot kinds built from one scan's scattered points (RHI/PPI views).
+_SCAN_POINT_PLOT_KINDS = ('rhi', 'ppi')
 
 # Step size tables for the Height/Distance/Speed range controls' up/down
 # buttons: a round number that scales with how wide the current
@@ -167,6 +188,10 @@ class _RangeControl:
     hands the fields back for manual entry/stepping, and the value the
     fields hold is then used verbatim.
 
+    The Bottom field can additionally be *locked* to a fixed value
+    (:meth:`lock_bottom`) -- used by the PPI view, whose distance
+    range always starts at 0 -- in which case only Top stays editable.
+
     This class only owns the widgets and the stepping arithmetic; it
     has no idea what it controls or how to redraw a plot -- that's the
     two callbacks the owning app supplies.
@@ -180,6 +205,8 @@ class _RangeControl:
         self.min_span = min_span
         self.on_auto_toggle = on_auto_toggle
         self.on_manual_change = on_manual_change
+        self._enabled = True
+        self._bottom_lock: Optional[float] = None
 
         # Bottom and Top sit side by side, each as a label above one
         # row of [entry][up][down] -- this keeps the control only as
@@ -238,28 +265,42 @@ class _RangeControl:
         self.auto_check.grid(
             row=2, column=0, columnspan=2, sticky='w', padx=4, pady=(2, 4))
 
-        self._manual_widgets = (
-            self.bottom_entry, self.top_entry,
-            self.bottom_up, self.bottom_down,
-            self.top_up, self.top_down)
+        self._bottom_widgets = (
+            self.bottom_entry, self.bottom_up, self.bottom_down)
+        self._top_widgets = (self.top_entry, self.top_up, self.top_down)
+        self._manual_widgets = self._bottom_widgets + self._top_widgets
         # Auto starts on, so the (not yet meaningful) manual controls
-        # start disabled -- _on_auto_toggle sets this consistently any
-        # time Auto is toggled, this just matches that at startup.
-        for w in self._manual_widgets:
-            w.configure(state='disabled')
+        # start disabled
+        self._apply_states()
 
-    # -- enable/disable the whole control (kind/mode-dependent greying) --
+    # -- widget states ----------------------------------------------------
+
+    def _apply_states(self) -> None:
+        """Set every widget's state from the enabled/Auto/locked flags:
+        disabled control -> everything off; Auto -> only the Auto box;
+        manual -> fields and steppers too, except a locked Bottom."""
+        self.auto_check.configure(
+            state='normal' if self._enabled else 'disabled')
+        manual = self._enabled and not self.auto_var.get()
+        for w in self._top_widgets:
+            w.configure(state='normal' if manual else 'disabled')
+        bottom_ok = manual and self._bottom_lock is None
+        for w in self._bottom_widgets:
+            w.configure(state='normal' if bottom_ok else 'disabled')
 
     def set_enabled(self, enabled: bool) -> None:
-        if enabled:
-            self.auto_check.configure(state='normal')
-            manual_state = 'disabled' if self.auto_var.get() else 'normal'
-            for w in self._manual_widgets:
-                w.configure(state=manual_state)
-        else:
-            self.auto_check.configure(state='disabled')
-            for w in self._manual_widgets:
-                w.configure(state='disabled')
+        """Enable/disable the whole control (kind/mode-dependent
+        greying)."""
+        self._enabled = enabled
+        self._apply_states()
+
+    def lock_bottom(self, value: Optional[float]) -> None:
+        """Fix the Bottom field at ``value`` (shown, not editable), or
+        release it again with ``None``."""
+        self._bottom_lock = value
+        if value is not None:
+            self.bottom_var.set(f'{value:.1f}')
+        self._apply_states()
 
     # -- value access ---------------------------------------------------
 
@@ -274,16 +315,15 @@ class _RangeControl:
         return bottom, top
 
     def set_display_range(self, lo: float, hi: float) -> None:
+        if self._bottom_lock is not None:
+            lo = self._bottom_lock
         self.bottom_var.set(f'{lo:.1f}')
         self.top_var.set(f'{hi:.1f}')
 
     # -- internal ---------------------------------------------------------
 
     def _on_auto_toggle(self) -> None:
-        auto = self.auto_var.get()
-        state = 'disabled' if auto else 'normal'
-        for w in self._manual_widgets:
-            w.configure(state=state)
+        self._apply_states()
         self.on_auto_toggle()
 
     def _step(self, which: str, direction: int) -> None:
@@ -300,6 +340,8 @@ class _RangeControl:
         bottom, top = rng
         step = _table_step_size(self.step_table, max(top - bottom, self.min_span))
         if which == 'bottom':
+            if self._bottom_lock is not None:
+                return
             new_bottom = (round(bottom / step) + direction) * step
             # refuse a step that would shrink the span below the
             # minimum, rather than overshooting the other end to force
@@ -351,7 +393,7 @@ class HaloViewerApp:
         self._last_profile = None
         self._last_series = None
         self._last_history = None
-        self._last_rhi = None
+        self._last_points = None
         self._kind_names: List[str] = []
 
         self._build_widgets()
@@ -411,23 +453,23 @@ class HaloViewerApp:
         self.kind_combo.bind('<<ComboboxSelected>>', self._on_kind_select)
         row += 1
 
-        # -- plot mode ----------------------------------------------------
+        # -- plot type: Profile / History / RHI / PPI -------------------
         ttk.Label(parent, text='Plot type').grid(row=row, column=0, sticky='w')
         row += 1
         mode_frame = ttk.Frame(parent)
         mode_frame.grid(row=row, column=0, sticky='w', pady=(0, 8))
         self.mode_var = tk.StringVar(value=PROFILE_MODE)
-        self.profile_radio = ttk.Radiobutton(
-            mode_frame, text='Profile', value=PROFILE_MODE,
-            variable=self.mode_var, command=self._on_mode_select)
-        self.profile_radio.grid(row=0, column=0, sticky='w', padx=(0, 8))
-        self.timeseries_radio = ttk.Radiobutton(
-            mode_frame, text='History', value=TIMESERIES_MODE,
-            variable=self.mode_var, command=self._on_mode_select)
-        self.timeseries_radio.grid(row=0, column=1, sticky='w')
+        self.mode_radios = {}
+        for col, (mode, label) in enumerate(_MODE_BUTTONS):
+            radio = ttk.Radiobutton(
+                mode_frame, text=label, value=mode,
+                variable=self.mode_var, command=self._on_mode_select)
+            radio.grid(row=0, column=col, sticky='w', padx=(0, 8))
+            self.mode_radios[mode] = radio
         row += 1
 
-        # -- intensity filter: [x] Filter (intensity < [1.018]) ------------
+        # -- intensity filter + fill:
+        # [x] Filter (intensity < [1.018])   [x] Fill -------------------
         filter_frame = ttk.Frame(parent)
         filter_frame.grid(row=row, column=0, sticky='w', pady=(0, 8))
         self.filter_var = tk.BooleanVar(value=False)
@@ -445,14 +487,19 @@ class HaloViewerApp:
                                lambda e: self._on_filter_value_leave())
         ttk.Label(filter_frame, text=')').grid(row=0, column=2, sticky='w')
         self._applied_filter: Optional[float] = None
+        self.fill_var = tk.BooleanVar(value=False)
+        self.fill_check = ttk.Checkbutton(
+            filter_frame, text='Fill', variable=self.fill_var,
+            command=self._on_fill_change)
+        self.fill_check.grid(row=0, column=3, sticky='w', padx=(12, 0))
         row += 1
 
         # -- range controls: Height (vertical axis -- height for the
-        # processed profile/history, gate-inferred distance for the raw
-        # scan history and RHI's own vertical axis), Distance (RHI
-        # Profile's horizontal cross-section axis only) and Speed (wind
-        # speed / radial velocity colour-or-axis range) -- all the same
-        # shape, see _RangeControl. --------------------------------------
+        # processed profile/history and the RHI view, gate-inferred
+        # distance for the raw scan history; not used by the PPI
+        # view), Distance (horizontal axis of the RHI/PPI views only)
+        # and Speed (wind speed / radial velocity colour-or-axis
+        # range) -- all the same shape, see _RangeControl. -----------
         self.height_ctrl = _RangeControl(
             parent, row, title='Height',
             bottom_label='Bottom (m)', top_label='Top (m)',
@@ -579,9 +626,12 @@ class HaloViewerApp:
 
         if plot_kind == 'wind_profile':
             self.fig, self.axes = plotting.create_profile_figure()
+        elif plot_kind in _SCAN_POINT_PLOT_KINDS:
+            # RHI / PPI: velocity and beta side by side
+            self.fig, self.axes = plotting.create_scan_pair_figure()
         else:
-            # wind_timeseries, scan_history and rhi_profile all share
-            # the two-stacked-panels-with-colorbars shape.
+            # wind_timeseries and scan_history share the
+            # two-stacked-panels-with-colorbars shape.
             self.fig, self.axes = plotting.create_timeseries_figure()
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.plot_container)
@@ -671,13 +721,12 @@ class HaloViewerApp:
         self.current_kind = kind
         info = get_kind_info(kind)
 
-        # enable/disable the mode radio buttons to match this kind's
-        # capabilities -- only Processed_Wind_Profile and RHI have a
-        # Profile mode; every other supported kind is greyed out there.
-        self.profile_radio.configure(
-            state='normal' if PROFILE_MODE in info.modes else 'disabled')
-        self.timeseries_radio.configure(
-            state='normal' if TIMESERIES_MODE in info.modes else 'disabled')
+        # enable/disable the plot type radio buttons to match this
+        # kind's capabilities: Profile only for Processed_Wind_Profile,
+        # RHI/PPI only for the regular scan kinds, History for all.
+        for mode, radio in self.mode_radios.items():
+            radio.configure(
+                state='normal' if mode in info.modes else 'disabled')
         if info.modes:
             if self.mode_var.get() not in info.modes:
                 self.mode_var.set(info.modes[0])
@@ -698,36 +747,44 @@ class HaloViewerApp:
         self._refresh_mode()
 
     def _plot_kind(self) -> Optional[str]:
-        """Which of the four load/render pipelines applies to the
-        current kind + selected mode, or ``None`` if nothing plottable
-        is selected. See the module docstring for what each one is."""
+        """Which of the five load/render pipelines applies to the
+        current kind + selected plot type, or ``None`` if nothing
+        plottable is selected. See the module docstring for what each
+        one is."""
         if not self.current_kind:
             return None
         mode = self.mode_var.get()
         if self.current_kind == 'Processed_Wind_Profile':
             return 'wind_profile' if mode == PROFILE_MODE else 'wind_timeseries'
-        if self.current_kind == 'RHI' and mode == PROFILE_MODE:
-            return 'rhi_profile'
-        # VAD, Stare, Wind_Profile (History only) and RHI's own History
-        # all share the raw intensity/beta scan-history plot.
+        if mode == RHI_MODE:
+            return 'rhi'
+        if mode == PPI_MODE:
+            return 'ppi'
+        # VAD, Stare, Wind_Profile and RHI in History mode all share the
+        # raw intensity/beta scan-history plot.
         return 'scan_history'
 
     def _update_range_controls_enabled(self, plot_kind: Optional[str]) -> None:
-        """Grey out the Height/Distance/Speed controls that don't apply
-        to the current plot kind: Height (the vertical axis) applies to
-        all four; Distance (the horizontal cross-section axis) only to
-        RHI's own Profile; Speed (the wind-speed/radial-velocity axis
-        or colour range) to everything with a speed dimension -- i.e.
-        everything except the raw scan history, whose two panels are
-        intensity and beta."""
-        self.height_ctrl.set_enabled(plot_kind is not None)
+        """Grey out the controls that don't apply to the current plot
+        kind: Height (the vertical axis) applies to everything except
+        the horizontal PPI view; Distance (the horizontal axis) only to
+        RHI/PPI, with its near end fixed at 0 in PPI; Speed (the
+        wind-speed/radial-velocity axis or colour range) to everything
+        with a speed dimension -- i.e. everything except the raw scan
+        history, whose two panels are intensity and beta; Fill only to
+        RHI/PPI."""
+        self.height_ctrl.set_enabled(plot_kind not in (None, 'ppi'))
         self.filter_check.configure(
             state='normal' if plot_kind is not None else 'disabled')
         self.filter_entry.configure(
             state='normal' if plot_kind is not None else 'disabled')
-        self.distance_ctrl.set_enabled(plot_kind == 'rhi_profile')
+        self.fill_check.configure(
+            state='normal' if plot_kind in _SCAN_POINT_PLOT_KINDS
+            else 'disabled')
+        self.distance_ctrl.lock_bottom(0.0 if plot_kind == 'ppi' else None)
+        self.distance_ctrl.set_enabled(plot_kind in _SCAN_POINT_PLOT_KINDS)
         self.speed_ctrl.set_enabled(
-            plot_kind in ('wind_profile', 'wind_timeseries', 'rhi_profile'))
+            plot_kind in ('wind_profile', 'wind_timeseries', 'rhi', 'ppi'))
 
     def _refresh_mode(self) -> None:
         info = get_kind_info(self.current_kind) if self.current_kind else None
@@ -807,6 +864,15 @@ class HaloViewerApp:
         self._apply_time_preset()
         self._apply_range()
 
+    def _compute_single_scan_limits(self) -> None:
+        """Precompute the fixed axis ranges of the per-file plot kinds
+        (see :meth:`_apply_range`)."""
+        plot_kind = self._plot_kind()
+        if plot_kind == 'wind_profile':
+            self._compute_profile_limits()
+        elif plot_kind in _SCAN_POINT_PLOT_KINDS:
+            self._compute_scan_points_limits()
+
     def _apply_range(self) -> None:
         if not self.current_kind or self.scan_result is None:
             return
@@ -827,20 +893,16 @@ class HaloViewerApp:
             self.status_var.set('No files in the selected time range.')
             return
 
-        # wind_profile/rhi_profile step through files one at a time, so
+        # wind_profile/rhi/ppi step through files one at a time, so
         # their Height/Distance/Speed ranges are precomputed once from
         # a sample of the whole selection here (kept fixed while
         # stepping); wind_timeseries/scan_history load the whole
         # selection in one go and resolve their own ranges from that.
-        plot_kind = self._plot_kind()
-        if plot_kind == 'wind_profile':
-            self._compute_profile_limits()
-        elif plot_kind == 'rhi_profile':
-            self._compute_rhi_profile_limits()
+        self._compute_single_scan_limits()
         self._draw_current()
 
     # ------------------------------------------------------------------
-    # intensity filter
+    # intensity filter / fill
     # ------------------------------------------------------------------
 
     def _intensity_min(self) -> Optional[float]:
@@ -880,16 +942,18 @@ class HaloViewerApp:
     def _on_filter_change(self) -> None:
         """Filter toggled or value entered: reload the current
         selection with the new filter, keeping the file position in
-        Profile mode (the filter changes what is shown, not which
-        files are loaded)."""
+        the per-file plot kinds (the filter changes what is shown, not
+        which files are loaded)."""
         if not self.current_files:
             return
-        plot_kind = self._plot_kind()
-        if plot_kind == 'wind_profile':
-            self._compute_profile_limits()
-        elif plot_kind == 'rhi_profile':
-            self._compute_rhi_profile_limits()
+        self._compute_single_scan_limits()
         self._draw_current()
+
+    def _on_fill_change(self) -> None:
+        """Fill toggled: purely a rendering choice, so just redraw the
+        already-loaded scan."""
+        if self.current_plot_kind in _SCAN_POINT_PLOT_KINDS:
+            self._render_current()
 
     def _title(self, title: str) -> str:
         if self._applied_filter is None:
@@ -911,11 +975,11 @@ class HaloViewerApp:
     #
     # Two distinct behaviours share the same four buttons, switched on
     # by the plot kind and the active time preset (_nav_shifts_window):
-    #  - Profile mode (wind_profile, rhi_profile), or Custom: per-file
-    #    browsing within the files that "Apply range" already loaded
-    #    (First/Last jump to the first/last loaded file, Back/Forward
-    #    step one file at a time).
-    #  - History mode with a fixed-length preset (Week/2 days/24h/12h/6h): the buttons
+    #  - the per-file plot types (Profile, RHI, PPI), or Custom:
+    #    per-file browsing within the files that "Apply range" already
+    #    loaded (First/Last jump to the first/last loaded file,
+    #    Back/Forward step one file at a time).
+    #  - History with a fixed-length preset (Week/2 days/24h/12h/6h): the buttons
     #    instead shift the whole [start, end] time *window* by one
     #    interval and reload -- First/Last jump the window to the true
     #    start/end of this kind's data, Back/Forward step the window by
@@ -928,7 +992,7 @@ class HaloViewerApp:
             state = 'disabled'
         else:
             state = ('normal' if (self._interval_active() or
-                                   self.mode_var.get() == PROFILE_MODE)
+                                   self.mode_var.get() in SINGLE_SCAN_MODES)
                       else 'disabled')
         for b in (self.btn_first, self.btn_back, self.btn_fwd, self.btn_last):
             b.configure(state=state)
@@ -974,11 +1038,11 @@ class HaloViewerApp:
         """True when the browse buttons should shift the whole time
         window rather than step through individual files: only for the
         History plots (which show the whole window at once) under a
-        fixed-length preset. The per-file Profile plots (wind_profile,
-        rhi_profile) always step file by file within the loaded window,
+        fixed-length preset. The per-file plots (wind_profile, rhi,
+        ppi) always step file by file within the loaded window,
         whatever preset is active."""
         return (self._interval_active() and
-                self._plot_kind() not in ('wind_profile', 'rhi_profile'))
+                self._plot_kind() not in _SINGLE_SCAN_PLOT_KINDS)
 
     def _go_first(self) -> None:
         if self._nav_shifts_window():
@@ -1032,13 +1096,14 @@ class HaloViewerApp:
             self._draw_timeseries()
         elif plot_kind == 'scan_history':
             self._draw_history()
-        elif plot_kind == 'rhi_profile':
-            self._draw_rhi_profile()
+        elif plot_kind in _SCAN_POINT_PLOT_KINDS:
+            self._draw_scan_points()
 
     def _render_current(self) -> None:
         """Redraw the plot kind that's actually built (:attr:`current_plot_kind`)
         from its already-loaded data, without touching disk -- used by
-        the range controls after a stepper click or Auto toggle."""
+        the range controls after a stepper click or Auto toggle, and by
+        the Fill checkbox."""
         plot_kind = self.current_plot_kind
         if plot_kind == 'wind_profile':
             self._render_profile()
@@ -1046,8 +1111,8 @@ class HaloViewerApp:
             self._render_timeseries()
         elif plot_kind == 'scan_history':
             self._render_history()
-        elif plot_kind == 'rhi_profile':
-            self._render_rhi_profile()
+        elif plot_kind in _SCAN_POINT_PLOT_KINDS:
+            self._render_scan_points()
 
     def _resolve_range(self, ctrl: _RangeControl,
                         natural: Tuple[float, float]) -> Tuple[float, float]:
@@ -1237,81 +1302,103 @@ class HaloViewerApp:
         self._sync_height_fields_from_axes()
 
     # ------------------------------------------------------------------
-    # drawing -- rhi_profile (RHI, Profile mode)
+    # drawing -- rhi / ppi (regular scan kinds, one scan's points)
     # ------------------------------------------------------------------
 
-    def _compute_rhi_profile_limits(self) -> None:
-        """Establish fixed distance/height/speed axis limits from a
-        sample of the current file selection, mirroring
-        :meth:`_compute_profile_limits`."""
+    def _compute_scan_points_limits(self) -> None:
+        """Establish fixed distance/height/speed limits for the RHI or
+        PPI view from a sample of the current file selection,
+        mirroring :meth:`_compute_profile_limits`.
+
+        RHI: Distance = the range of ``x`` (can be negative), Height =
+        the range of ``z``. PPI: Distance = ``(0, max(|x|, |y|))`` --
+        both axes then span ``[-max, +max]``; Height is unused."""
+        ppi = self._plot_kind() == 'ppi'
         sample = _sample(self.current_files, _MAX_FILES_FOR_LIMITS)
         intensity_min = self._intensity_min()
-        d_min, d_max = None, None
-        h_min, h_max = None, None
+        x_min, x_max = None, None
+        z_min, z_max = None, None
+        r_max = None
         v_max = 1.0
         for entry in sample:
             try:
-                cross = _data.load_rhi_cross_section(
+                pts = _data.load_scan_points(
                     entry.path, intensity_min=intensity_min)
             except (IOError, ValueError):
                 continue
-            if cross.distance.size:
-                lo = float(np.nanmin(cross.distance))
-                hi = float(np.nanmax(cross.distance))
-                d_min = lo if d_min is None else min(d_min, lo)
-                d_max = hi if d_max is None else max(d_max, hi)
-            if cross.height.size:
-                lo = float(np.nanmin(cross.height))
-                hi = float(np.nanmax(cross.height))
-                h_min = lo if h_min is None else min(h_min, lo)
-                h_max = hi if h_max is None else max(h_max, hi)
-            if cross.velocity.size and np.any(np.isfinite(cross.velocity)):
-                v_max = max(v_max, float(np.nanmax(np.abs(cross.velocity))))
+            if pts.x.size and np.any(np.isfinite(pts.x)):
+                lo, hi = float(np.nanmin(pts.x)), float(np.nanmax(pts.x))
+                x_min = lo if x_min is None else min(x_min, lo)
+                x_max = hi if x_max is None else max(x_max, hi)
+                r = float(np.nanmax(np.abs(np.concatenate([pts.x, pts.y]))))
+                r_max = r if r_max is None else max(r_max, r)
+            if pts.z.size and np.any(np.isfinite(pts.z)):
+                lo, hi = float(np.nanmin(pts.z)), float(np.nanmax(pts.z))
+                z_min = lo if z_min is None else min(z_min, lo)
+                z_max = hi if z_max is None else max(z_max, hi)
+            if pts.velocity.size and np.any(np.isfinite(pts.velocity)):
+                v_max = max(v_max, float(np.nanmax(np.abs(pts.velocity))))
 
-        natural_distance = _pad_range(d_min, d_max, default=(0.0, 1000.0))
-        self._distance_xlim = self._resolve_range(self.distance_ctrl, natural_distance)
+        if ppi:
+            natural_distance = (0.0, r_max * 1.03 if r_max else 1000.0)
+        else:
+            natural_distance = _pad_range(x_min, x_max, default=(0.0, 1000.0))
+        self._distance_xlim = self._resolve_range(self.distance_ctrl,
+                                                  natural_distance)
 
         vmax_capped = min(v_max * 1.1, plotting.MAX_AUTOSCALE_SPEED)
         natural_speed = (-vmax_capped, vmax_capped)
         self._speed_range = self._resolve_range(self.speed_ctrl, natural_speed)
 
         if self.height_ctrl.auto_var.get():
-            self._height_ylim = _pad_range(h_min, h_max) if h_min is not None else None
+            self._height_ylim = (_pad_range(z_min, z_max)
+                                 if z_min is not None else None)
 
-    def _draw_rhi_profile(self) -> None:
-        """Load the current file and render it as a distance/height
-        cross section; see :meth:`_draw_profile` for the load/render
-        split."""
+    def _draw_scan_points(self) -> None:
+        """Load the current file and render it as an RHI or PPI view;
+        see :meth:`_draw_profile` for the load/render split."""
         if not self.current_files:
             return
-        if self.axes is None or self.current_plot_kind != 'rhi_profile':
-            self._set_mode_figure('rhi_profile')
+        plot_kind = self._plot_kind()
+        if self.axes is None or self.current_plot_kind != plot_kind:
+            self._set_mode_figure(plot_kind)
         entry = self.current_files[self.current_index]
         try:
-            self._last_rhi = _data.load_rhi_cross_section(
+            self._last_points = _data.load_scan_points(
                 entry.path, intensity_min=self._applied_filter)
         except (IOError, ValueError) as exc:
             self._show_message(f'Could not read {entry.path.name}:\n{exc}')
             return
-        self._render_rhi_profile()
+        self._render_scan_points()
         self.status_var.set(
             f'{entry.path.name}\n'
             f'File {self.current_index + 1} of {len(self.current_files)}')
 
-    def _render_rhi_profile(self) -> None:
-        """Redraw the RHI cross section from :attr:`_last_rhi` and the
-        current axis limits, without touching disk."""
-        cross = self._last_rhi
-        if cross is None or self.axes is None:
+    def _render_scan_points(self) -> None:
+        """Redraw the RHI/PPI view from :attr:`_last_points` and the
+        current axis limits and Fill setting, without touching disk."""
+        pts = self._last_points
+        plot_kind = self.current_plot_kind
+        if (pts is None or self.axes is None or
+                plot_kind not in _SCAN_POINT_PLOT_KINDS):
             return
-        ax_vel, ax_beta, cax_vel, cax_beta = self.axes
-        plotting.plot_rhi_cross_section(
-            ax_vel, ax_beta, cax_vel, cax_beta,
-            cross.distance, cross.height, cross.velocity, cross.beta,
-            distance_xlim=self._distance_xlim, height_ylim=self._height_ylim,
-            speed_vlim=self._speed_range,
-            title=self._title(
-                f'{self.current_kind}  {cross.timestamp:%Y-%m-%d %H:%M:%S}'))
+        title = self._title(
+            f'{plotting.scan_view_title(self.current_kind, plot_kind)}  '
+            f'{pts.timestamp:%Y-%m-%d %H:%M:%S}')
+        fill = bool(self.fill_var.get())
+        if plot_kind == 'rhi':
+            plotting.plot_rhi(
+                *self.axes, pts.x, pts.z, pts.velocity, pts.beta,
+                distance_xlim=self._distance_xlim,
+                height_ylim=self._height_ylim, speed_vlim=self._speed_range,
+                fill=fill, azimuth0=pts.azimuth0, title=title)
+        else:
+            distance_max = (self._distance_xlim[1]
+                            if self._distance_xlim else None)
+            plotting.plot_ppi(
+                *self.axes, pts.x, pts.y, pts.velocity, pts.beta,
+                distance_max=distance_max, speed_vlim=self._speed_range,
+                fill=fill, azimuth0=pts.azimuth0, title=title)
         self.canvas.draw_idle()
         self._sync_height_fields_from_axes()
 
@@ -1327,8 +1414,10 @@ class HaloViewerApp:
     def _sync_height_fields_from_axes(self) -> None:
         """In Auto mode, mirror the plot's actual (autoscaled) height
         limits into the -- disabled, display-only -- Bottom/Top fields,
-        so they always show real numbers rather than stale ones."""
-        if not self.height_ctrl.auto_var.get() or self.axes is None:
+        so they always show real numbers rather than stale ones. (Not
+        in the PPI view, whose y axis is a horizontal distance.)"""
+        if (not self.height_ctrl.auto_var.get() or self.axes is None or
+                self.current_plot_kind == 'ppi'):
             return
         lo, hi = self.axes[0].get_ylim()
         self.height_ctrl.set_display_range(lo, hi)
@@ -1340,8 +1429,8 @@ class HaloViewerApp:
             if self.current_files:
                 if self.current_plot_kind == 'wind_profile':
                     self._compute_profile_limits()
-                elif self.current_plot_kind == 'rhi_profile':
-                    self._compute_rhi_profile_limits()
+                elif self.current_plot_kind in _SCAN_POINT_PLOT_KINDS:
+                    self._compute_scan_points_limits()
                 self._render_current()
         else:
             # seed the now-editable fields: bottom defaults to ground
@@ -1364,14 +1453,15 @@ class HaloViewerApp:
         self._render_current()
 
     # ------------------------------------------------------------------
-    # Distance range (RHI Profile only)
+    # Distance range (RHI / PPI only)
     # ------------------------------------------------------------------
 
     def _on_distance_auto_toggle(self) -> None:
         auto = self.distance_ctrl.auto_var.get()
         if auto:
-            if self.current_files and self.current_plot_kind == 'rhi_profile':
-                self._compute_rhi_profile_limits()
+            if (self.current_files and
+                    self.current_plot_kind in _SCAN_POINT_PLOT_KINDS):
+                self._compute_scan_points_limits()
                 self._render_current()
         else:
             lo, hi = self._distance_xlim or (0.0, 1000.0)
@@ -1388,7 +1478,7 @@ class HaloViewerApp:
         self._render_current()
 
     # ------------------------------------------------------------------
-    # Speed range (wind_profile, wind_timeseries, rhi_profile)
+    # Speed range (wind_profile, wind_timeseries, rhi, ppi)
     # ------------------------------------------------------------------
 
     def _on_speed_auto_toggle(self) -> None:
@@ -1399,8 +1489,8 @@ class HaloViewerApp:
                     self._compute_profile_limits()
                 elif self.current_plot_kind == 'wind_timeseries':
                     self._compute_series_speed_range()
-                elif self.current_plot_kind == 'rhi_profile':
-                    self._compute_rhi_profile_limits()
+                elif self.current_plot_kind in _SCAN_POINT_PLOT_KINDS:
+                    self._compute_scan_points_limits()
                 self._render_current()
         else:
             lo, hi = self._speed_range or (0.0, 25.0)

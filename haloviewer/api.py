@@ -22,8 +22,8 @@ Three entry points, from highest- to lowest-level:
     Plots one already-known file.
 :func:`plot_files`
     Plots several already-known files of the same kind together (a
-    History) -- or, for RHI's own ``"profile"`` mode, a single scan's
-    cross section if exactly one path is given.
+    History) -- or, for a single-scan mode (``"profile"``, ``"rhi"``,
+    ``"ppi"``), that one scan if exactly one path is given.
 """
 
 from __future__ import annotations
@@ -47,8 +47,8 @@ else:
 
 from . import data as _data
 from . import plotting
-from .scan import (PROFILE_MODE, TIMESERIES_MODE, get_kind_info,
-                    parse_filename)
+from .scan import (PPI_MODE, PROFILE_MODE, RHI_MODE, SINGLE_SCAN_MODES,
+                    TIMESERIES_MODE, get_kind_info, parse_filename)
 
 __all__ = ['plot', 'plot_file', 'plot_files']
 
@@ -109,39 +109,59 @@ _SCAN_HISTORY_KINDS = {'VAD', 'Stare', 'Wind_Profile', 'RHI'}
 
 
 def _classify(kind: str, mode: str) -> str:
-    """Which of the four load/render pipelines a (kind, mode) pair maps
+    """Which of the five load/render pipelines a (kind, mode) pair maps
     to -- the same classification as
     :meth:`haloviewer.gui.HaloViewerApp._plot_kind`, but as a
     pure function with no GUI state, used here only to decide whether
-    ``distance``/``speed`` apply (see :func:`_warn_if_inapplicable`)."""
+    ``height``/``distance``/``speed``/``fill`` apply (see
+    :func:`_warn_if_inapplicable`)."""
     if kind == 'Processed_Wind_Profile':
         return 'wind_profile' if mode == PROFILE_MODE else 'wind_timeseries'
-    if kind == 'RHI' and mode == PROFILE_MODE:
-        return 'rhi_profile'
+    if mode == RHI_MODE:
+        return 'rhi'
+    if mode == PPI_MODE:
+        return 'ppi'
     return 'scan_history'
 
 
-#: `distance` only means anything for RHI's own cross-section Profile.
-_DISTANCE_APPLICABLE = {'rhi_profile'}
+#: `height` is the vertical axis of everything except the PPI view
+#: (a horizontal plane has no height axis).
+_HEIGHT_APPLICABLE = {'wind_profile', 'wind_timeseries', 'scan_history',
+                      'rhi'}
+#: `distance` is the horizontal axis of the RHI/PPI views only.
+_DISTANCE_APPLICABLE = {'rhi', 'ppi'}
 #: `speed` means a wind-speed or radial-velocity axis/colour range;
 #: the raw scan kinds' History image has no such dimension (its panels
 #: are intensity and beta).
-_SPEED_APPLICABLE = {'wind_profile', 'wind_timeseries', 'rhi_profile'}
+_SPEED_APPLICABLE = {'wind_profile', 'wind_timeseries', 'rhi', 'ppi'}
+#: `fill` (nearest-neighbour fill between points) only applies to the
+#: scattered-point RHI/PPI views.
+_FILL_APPLICABLE = {'rhi', 'ppi'}
 
 
-def _warn_if_inapplicable(kind: str, mode: str, *,
-                           distance=None, speed=None) -> None:
+def _warn_if_inapplicable(kind: str, mode: str, *, height=None,
+                           distance=None, speed=None, fill=False) -> None:
     plot_kind = _classify(kind, mode)
+    if height is not None and plot_kind not in _HEIGHT_APPLICABLE:
+        warnings.warn(
+            f'height= is not applicable to {kind!r} in {mode!r} mode '
+            f'(a horizontal PPI plane has no height axis) -- ignoring it',
+            stacklevel=3)
     if distance is not None and plot_kind not in _DISTANCE_APPLICABLE:
         warnings.warn(
             f'distance= is not applicable to {kind!r} in {mode!r} mode '
-            f'(only RHI\'s own "profile" mode has a distance axis) -- '
+            f'(only the "rhi" and "ppi" modes have a distance axis) -- '
             f'ignoring it', stacklevel=3)
     if speed is not None and plot_kind not in _SPEED_APPLICABLE:
         warnings.warn(
             f'speed= is not applicable to {kind!r} in {mode!r} mode '
             f'(its panels have no speed/velocity dimension) -- ignoring it',
             stacklevel=3)
+    if fill and plot_kind not in _FILL_APPLICABLE:
+        warnings.warn(
+            f'fill= is not applicable to {kind!r} in {mode!r} mode '
+            f'(only the "rhi" and "ppi" modes draw scattered points) -- '
+            f'ignoring it', stacklevel=3)
 
 
 @contextlib.contextmanager
@@ -180,6 +200,15 @@ def _warn_filter_missing(missing, stacklevel: int = 3) -> None:
             f'timestamp found', stacklevel=stacklevel)
 
 
+def _ppi_distance_max(distance: Optional[Tuple[float, float]]
+                      ) -> Optional[float]:
+    """The PPI view only uses the far end of ``distance`` (both axes
+    span ``[-max, +max]``); the near end is fixed at 0."""
+    if distance is None:
+        return None
+    return float(max(distance))
+
+
 def plot_file(path: PathLike, *,
               mode: Optional[str] = None,
               height: Optional[Tuple[float, float]] = None,
@@ -189,28 +218,33 @@ def plot_file(path: PathLike, *,
               show: bool = False,
               figsize: Optional[Tuple[float, float]] = None,
               fontsize: Optional[float] = None,
-              filter: FilterArg = None) -> Figure:
+              filter: FilterArg = None,
+              fill: bool = False) -> Figure:
     """
     Plot a single Halo wind lidar file.
 
     :param path: path to a ``.hpl`` file.
-    :param mode: ``"profile"`` or ``"timeseries"`` (shown in the GUI as \
-        "History"). Defaults to the first mode the file's kind \
-        supports. Only ``Processed_Wind_Profile`` and ``RHI`` support \
-        ``"profile"`` (a single scan by itself -- a height/speed/ \
-        direction profile for the former, a distance/height cross \
-        section for the latter); every other supported kind (VAD, \
-        Stare, Wind_Profile) only has ``"timeseries"``/History. A \
-        single file plotted in that mode produces a one-column (or, \
-        for the scan kinds, one-file's-worth-of-rays) image; use \
+    :param mode: ``"profile"``, ``"timeseries"`` (shown in the GUI as \
+        "History"), ``"rhi"`` or ``"ppi"``. Defaults to the first mode \
+        the file's kind supports. ``"profile"`` (a height/speed/ \
+        direction profile) is only available for \
+        ``Processed_Wind_Profile``; ``"rhi"`` (the scan's points \
+        projected onto the vertical x/z plane, x along the first ray's \
+        azimuth) and ``"ppi"`` (projected onto the horizontal x/y \
+        plane) only for the regular scan kinds (VAD, Stare, \
+        Wind_Profile, RHI). A single file plotted in \
+        ``"timeseries"``/History mode produces a one-column (or, for \
+        the scan kinds, one-file's-worth-of-rays) image; use \
         :func:`plot_files` to combine several files into a real \
         history.
-    :param height: fixed ``(min, max)`` for the shared vertical axis \
-        (height, or gate-inferred distance for the raw scan kinds); \
-        ``None`` autoscales. Always applicable.
+    :param height: fixed ``(min, max)`` for the vertical axis (height, \
+        or gate-inferred distance for the raw scan kinds' History); \
+        ``None`` autoscales. Not applicable to ``"ppi"`` -- a warning \
+        is issued (and the value ignored) there.
     :param distance: fixed ``(min, max)`` for the horizontal distance \
-        axis; only applicable to RHI's own "profile" mode -- a \
-        warning is issued (and the value ignored) otherwise.
+        axis of the ``"rhi"`` view; for ``"ppi"`` only the max is used \
+        (both axes then span ``[-max, +max]``). A warning is issued \
+        (and the value ignored) for the other modes.
     :param speed: fixed ``(min, max)`` for the wind-speed/radial- \
         velocity axis or colour range; not applicable to the raw scan \
         kinds' "timeseries"/History image -- a warning is issued (and \
@@ -237,6 +271,9 @@ def plot_file(path: PathLike, *,
         judged by the intensity of the ``Wind_Profile`` scan file with \
         the same timestamp (a warning is issued for profiles that have \
         none, which are then left unfiltered).
+    :param fill: ``"rhi"``/``"ppi"`` only: fill the area between the \
+        data points by nearest-neighbour interpolation instead of \
+        drawing individual points (needs :mod:`scipy`).
     :returns: the :class:`~matplotlib.figure.Figure` that was drawn.
     """
     path = Path(path)
@@ -249,7 +286,8 @@ def plot_file(path: PathLike, *,
                 f'plotting is not yet implemented for file kind {kind!r}')
         mode = info.modes[0]
     _check_supported(kind, mode)
-    _warn_if_inapplicable(kind, mode, distance=distance, speed=speed)
+    _warn_if_inapplicable(kind, mode, height=height, distance=distance,
+                          speed=speed, fill=fill)
 
     figsize = figsize or DEFAULT_FIGSIZE
 
@@ -257,7 +295,7 @@ def plot_file(path: PathLike, *,
         return plot_files([path], mode=mode, height=height,
                            distance=distance, speed=speed, output=output,
                            show=show, figsize=figsize, fontsize=fontsize,
-                           filter=intensity_min)
+                           filter=intensity_min, fill=fill)
 
     fig = _new_figure(show, figsize)
     resolved_fontsize = fontsize if fontsize is not None else _auto_fontsize(figsize)
@@ -274,18 +312,25 @@ def plot_file(path: PathLike, *,
                 title=_filter_title(
                     f'{kind}  {prof.timestamp:%Y-%m-%d %H:%M:%S}',
                     intensity_min))
-        elif mode == PROFILE_MODE and kind == 'RHI':
-            cross = _data.load_rhi_cross_section(
-                path, intensity_min=intensity_min)
-            fig, (ax_vel, ax_beta, cax_vel, cax_beta) = \
-                plotting.create_timeseries_figure(figsize=figsize, fig=fig)
-            plotting.plot_rhi_cross_section(
-                ax_vel, ax_beta, cax_vel, cax_beta,
-                cross.distance, cross.height, cross.velocity, cross.beta,
-                distance_xlim=distance, height_ylim=height, speed_vlim=speed,
-                title=_filter_title(
-                    f'{kind}  {cross.timestamp:%Y-%m-%d %H:%M:%S}',
-                    intensity_min))
+        elif mode in (RHI_MODE, PPI_MODE):
+            pts = _data.load_scan_points(path, intensity_min=intensity_min)
+            fig, axes = plotting.create_scan_pair_figure(
+                figsize=figsize, fig=fig)
+            title = _filter_title(
+                f'{plotting.scan_view_title(kind, mode)}  '
+                f'{pts.timestamp:%Y-%m-%d %H:%M:%S}', intensity_min)
+            if mode == RHI_MODE:
+                plotting.plot_rhi(
+                    *axes, pts.x, pts.z, pts.velocity, pts.beta,
+                    distance_xlim=distance, height_ylim=height,
+                    speed_vlim=speed, fill=fill, azimuth0=pts.azimuth0,
+                    title=title)
+            else:
+                plotting.plot_ppi(
+                    *axes, pts.x, pts.y, pts.velocity, pts.beta,
+                    distance_max=_ppi_distance_max(distance),
+                    speed_vlim=speed, fill=fill, azimuth0=pts.azimuth0,
+                    title=title)
         else:
             raise ValueError(f'mode {mode!r} is not supported for kind {kind!r}')
 
@@ -303,6 +348,7 @@ def plot_files(paths: Iterable[PathLike], *,
                 figsize: Optional[Tuple[float, float]] = None,
                 fontsize: Optional[float] = None,
                 filter: FilterArg = None,
+                fill: bool = False,
                 fig: Optional[Figure] = None) -> Figure:
     """
     Plot several Halo wind lidar files of the same kind together as a
@@ -312,8 +358,9 @@ def plot_files(paths: Iterable[PathLike], *,
 
     :param paths: paths to ``.hpl`` files, all of the same kind.
     :param mode: only ``"timeseries"``/History is meaningful here for \
-        multiple files; RHI's single-scan ``"profile"`` cross section \
-        is routed to :func:`plot_file` if exactly one path is given.
+        multiple files; a single-scan mode (``"profile"``, ``"rhi"``, \
+        ``"ppi"``) is routed to :func:`plot_file` if exactly one path \
+        is given.
     :param height: see :func:`plot_file`.
     :param distance: see :func:`plot_file`.
     :param speed: see :func:`plot_file`.
@@ -325,6 +372,7 @@ def plot_files(paths: Iterable[PathLike], *,
         :func:`plot_file`.
     :param filter: optional intensity filter (``None``, ``True`` or a \
         threshold); see :func:`plot_file`.
+    :param fill: see :func:`plot_file` (single-scan RHI/PPI only).
     :param fig: internal use (an already-created figure to draw into).
     :returns: the :class:`~matplotlib.figure.Figure` that was drawn.
     """
@@ -337,18 +385,19 @@ def plot_files(paths: Iterable[PathLike], *,
         raise ValueError(f'files must all be the same kind, got {kinds}')
     kind = kinds.pop()
 
-    if mode == PROFILE_MODE and kind == 'RHI':
+    if mode in SINGLE_SCAN_MODES:
         if len(paths) != 1:
             raise ValueError(
-                'RHI "profile" mode is a single scan\'s cross section; '
-                'pass exactly one file (got %d)' % len(paths))
+                f'{mode!r} mode shows a single scan; pass exactly one '
+                f'file (got {len(paths)})')
         return plot_file(paths[0], mode=mode, height=height,
                           distance=distance, speed=speed, output=output,
                           show=show, figsize=figsize, fontsize=fontsize,
-                          filter=intensity_min)
+                          filter=intensity_min, fill=fill)
 
     _check_supported(kind, mode)
-    _warn_if_inapplicable(kind, mode, distance=distance, speed=speed)
+    _warn_if_inapplicable(kind, mode, height=height, distance=distance,
+                          speed=speed, fill=fill)
 
     figsize = figsize or DEFAULT_FIGSIZE
     if fig is None:
@@ -460,7 +509,25 @@ def _normalize_mode(mode: Optional[str]) -> Optional[str]:
         return PROFILE_MODE
     if m in ('history', 'timeseries'):
         return TIMESERIES_MODE
-    raise ValueError(f'mode must be "profile" or "history", got {mode!r}')
+    if m == 'rhi':
+        return RHI_MODE
+    if m == 'ppi':
+        return PPI_MODE
+    raise ValueError(
+        f'mode must be "profile", "history", "rhi" or "ppi", got {mode!r}')
+
+
+def _default_single_scan_mode(kind: str) -> Optional[str]:
+    """The mode :func:`plot` picks when exactly one file is in range:
+    the kind's own single-scan view (``"profile"`` for
+    ``Processed_Wind_Profile``, ``"rhi"`` for ``RHI``), or ``None`` for
+    kinds that default to History even for one file."""
+    info = get_kind_info(kind)
+    if PROFILE_MODE in info.modes:
+        return PROFILE_MODE
+    if kind == 'RHI' and RHI_MODE in info.modes:
+        return RHI_MODE
+    return None
 
 
 def plot(path: Union[PathLike, Iterable[PathLike]], *,
@@ -475,7 +542,8 @@ def plot(path: Union[PathLike, Iterable[PathLike]], *,
          show: bool = False,
          figsize: Optional[Tuple[float, float]] = None,
          fontsize: Optional[float] = None,
-         filter: FilterArg = None) -> Figure:
+         filter: FilterArg = None,
+         fill: bool = False) -> Figure:
     """
     High-level entry point: resolve ``path``, pick the file kind and
     time range, and plot it. This is what :mod:`haloviewer.cli`
@@ -489,12 +557,14 @@ def plot(path: Union[PathLike, Iterable[PathLike]], *,
     :param kind: which file kind to plot (e.g. ``"RHI"``). Optional if \
         every file ``path`` resolves to is the same kind (inferred \
         from each filename); required if they span more than one kind.
-    :param mode: ``"profile"`` or ``"history"`` (``"timeseries"`` is \
-        also accepted). Defaults to ``"profile"`` if exactly one file \
-        falls in the resolved time range and the kind supports it, \
-        else ``"history"``. In ``"profile"`` mode with more than one \
-        file in range, the single most recent one (at or before \
-        ``end``) is plotted.
+    :param mode: ``"profile"``, ``"history"`` (``"timeseries"`` is \
+        also accepted), ``"rhi"`` or ``"ppi"``. Defaults to the kind's \
+        single-scan view (``"profile"`` for Processed_Wind_Profile, \
+        ``"rhi"`` for RHI) if exactly one file falls in the resolved \
+        time range, else ``"history"``. In a single-scan mode \
+        (``"profile"``, ``"rhi"``, ``"ppi"``) with more than one file \
+        in range, the single most recent one (at or before ``end``) \
+        is plotted.
     :param start: start of the time range: an absolute timestamp \
         (e.g. ``"2026-09-21 00:00"``), or a relative interval back \
         from ``end`` such as ``"24h"`` or ``"2d"``. Omit for no lower \
@@ -503,11 +573,12 @@ def plot(path: Union[PathLike, Iterable[PathLike]], *,
         to the latest timestamp among the resolved (and kind-filtered) \
         files -- which, when exactly one such file was found, is just \
         that file's own timestamp.
-    :param height: fixed ``(min, max)`` for the shared vertical axis; \
-        ``None`` autoscales. Always applicable -- see :func:`plot_file`.
+    :param height: fixed ``(min, max)`` for the vertical axis; \
+        ``None`` autoscales. Not applicable to ``"ppi"`` -- see \
+        :func:`plot_file`.
     :param distance: fixed ``(min, max)`` for the horizontal distance \
-        axis (RHI "profile" mode only; warns and is ignored elsewhere) \
-        -- see :func:`plot_file`.
+        axis (``"rhi"``; only the max for ``"ppi"``; warns and is \
+        ignored elsewhere) -- see :func:`plot_file`.
     :param speed: fixed ``(min, max)`` for the wind-speed/radial- \
         velocity axis or colour range (warns and is ignored for the \
         raw scan kinds' History image) -- see :func:`plot_file`.
@@ -522,6 +593,8 @@ def plot(path: Union[PathLike, Iterable[PathLike]], *,
         ``True`` (threshold \
         :data:`~haloviewer.data.DEFAULT_INTENSITY_FILTER` = 1.018) or a \
         threshold value; see :func:`plot_file`.
+    :param fill: ``"rhi"``/``"ppi"`` only: nearest-neighbour fill \
+        between the data points; see :func:`plot_file`.
     :returns: the :class:`~matplotlib.figure.Figure` that was drawn.
     :raises ValueError: if no files are found, if they span more than \
         one kind and ``kind`` wasn't given, if ``kind`` matches none \
@@ -581,8 +654,9 @@ def plot(path: Union[PathLike, Iterable[PathLike]], *,
     info = get_kind_info(kind)
     norm_mode = _normalize_mode(mode)
     if norm_mode is None:
-        if len(in_range) == 1 and PROFILE_MODE in info.modes:
-            norm_mode = PROFILE_MODE
+        single = _default_single_scan_mode(kind)
+        if len(in_range) == 1 and single is not None:
+            norm_mode = single
         elif TIMESERIES_MODE in info.modes:
             norm_mode = TIMESERIES_MODE
         elif info.modes:
@@ -591,17 +665,17 @@ def plot(path: Union[PathLike, Iterable[PathLike]], *,
             raise NotImplementedError(
                 f'plotting is not yet implemented for file kind {kind!r}')
 
-    if norm_mode == PROFILE_MODE and len(in_range) > 1:
-        # "profile" is inherently single-scan: take the most recent
-        # file at or before `end` as the natural anchor for "the
-        # profile as of this time".
+    if norm_mode in SINGLE_SCAN_MODES and len(in_range) > 1:
+        # a single-scan mode is inherently one file: take the most
+        # recent file at or before `end` as the natural anchor for
+        # "the scan as of this time".
         in_range = [in_range[-1]]
 
     paths_out = [p for p, _, _ in in_range]
     common_kwargs = dict(mode=norm_mode, height=height, distance=distance,
                           speed=speed, output=output, show=show,
                           figsize=figsize, fontsize=fontsize,
-                          filter=intensity_min)
+                          filter=intensity_min, fill=fill)
     if len(paths_out) == 1:
         return plot_file(paths_out[0], **common_kwargs)
     return plot_files(paths_out, **common_kwargs)

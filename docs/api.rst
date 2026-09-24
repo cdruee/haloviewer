@@ -30,6 +30,15 @@ available directly from a script or notebook:
        end="2026-09-19 12:00", height=(0, 3000), speed=(0, 20),
        output="rhi_24h.png")
 
+   # one scan projected onto the vertical ("rhi") or horizontal ("ppi")
+   # plane, x along the first ray's azimuth; fill=True fills between the
+   # points by nearest-neighbour interpolation. For "ppi" only the max
+   # of distance= is used (both axes span -max..+max).
+   fig = haloviewer.plot("RHI_77_20260921_000812.hpl", mode="rhi",
+                         fill=True, output="rhi.png")
+   fig = haloviewer.plot("VAD_77_20260921_000721.hpl", mode="ppi",
+                         distance=(0, 2000), output="ppi.png")
+
    # fontsize defaults to scaling with figsize (16pt at A4 landscape,
    # proportionally smaller/larger otherwise); pass it explicitly to
    # override that
@@ -62,10 +71,11 @@ Warnings and errors
 -------------------
 
 Advisory conditions (a glob pattern matching nothing, a missing path, a
-file name that doesn't follow the Halo convention, a ``distance=`` or
-``speed=`` range that doesn't apply) are issued with :func:`warnings.warn`
-and don't stop the plot. They can be filtered or turned into errors with
-the standard :mod:`warnings` machinery:
+file name that doesn't follow the Halo convention, a ``height=``,
+``distance=``, ``speed=`` or ``fill=`` setting that doesn't apply) are
+issued with :func:`warnings.warn` and don't stop the plot. They can be
+filtered or turned into errors with the standard :mod:`warnings`
+machinery:
 
 .. code:: python
 
@@ -77,9 +87,9 @@ the standard :mod:`warnings` machinery:
        haloviewer.plot("Proc/2026/202609", kind="VAD", speed=(0, 20))
 
 Conditions that make a plot impossible raise :class:`ValueError`
-(no files, ambiguous or unknown kind, empty time range) or
-:class:`NotImplementedError` (a kind/mode combination that isn't
-supported).
+(no files, ambiguous or unknown kind, empty time range, a mode the kind
+doesn't support) or :class:`NotImplementedError` (a kind that isn't
+supported at all).
 
 Package information
 -------------------

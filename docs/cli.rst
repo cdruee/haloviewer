@@ -13,10 +13,10 @@ Synopsis
 
 .. code:: text
 
-   haloplot FILE [FILE ...] [-k KIND] [--mode {profile,history}]
+   haloplot FILE [FILE ...] [-k KIND] [--mode {profile,history,rhi,ppi}]
             [-s START] [-t TIME] [--height MIN MAX] [--dist MIN MAX]
-            [--speed MIN MAX] [--filter VALUE] [-p PATH] [--show]
-            [--figsize WIDTH HEIGHT] [--verbose]
+            [--speed MIN MAX] [--filter VALUE] [--fill] [-p PATH]
+            [--show] [--figsize WIDTH HEIGHT] [--verbose]
 
 How the plot is chosen
 ----------------------
@@ -53,31 +53,44 @@ in the simplest case a single file name is enough.
    lower limit. If no file falls into the range, ``haloplot`` stops with
    an error.
 
-4. **Mode.** ``--mode profile`` draws a single scan and ``--mode
-   history`` combines all files in the range into a time/height (or
-   time/distance) image. By default, *profile* is used when exactly one
-   file is in range and the kind supports it, otherwise *history*. If
-   *profile* is requested while several files are in range, the newest
-   file at or before the end time is plotted.
+4. **Mode.** ``--mode history`` combines all files in the range into a
+   time/height (or time/distance) image. The other three modes show a
+   single file: ``--mode profile`` a processed wind profile,
+   ``--mode rhi`` and ``--mode ppi`` one scan's data points projected
+   onto the vertical or the horizontal plane (see :doc:`viewer` for the
+   coordinate frame: x points along the azimuth of the scan's first
+   ray). By default, the kind's own single-file view -- *profile* for
+   ``Processed_Wind_Profile``, *rhi* for ``RHI`` -- is used when exactly
+   one file is in range, otherwise *history*. If a single-file mode is
+   requested while several files are in range, the newest file at or
+   before the end time is plotted.
 
 Which kinds support which mode:
 
 .. list-table::
    :header-rows: 1
-   :widths: 35 30 35
+   :widths: 28 18 18 18 18
 
    * - kind
      - profile
      - history
+     - rhi
+     - ppi
    * - ``Processed_Wind_Profile``
      - speed + direction vs. height
      - speed + direction, time/height
+     - --
+     - --
    * - ``RHI``
-     - velocity + beta, distance/height cross section
+     - --
      - intensity + beta, time/distance
+     - velocity + beta, x/z
+     - velocity + beta, x/y
    * - ``VAD``, ``Stare``, ``Wind_Profile``
      - --
      - intensity + beta, time/distance
+     - velocity + beta, x/z
+     - velocity + beta, x/y
 
 The plots themselves are the same as in the graphic viewer and are
 described in more detail in :doc:`viewer`.
@@ -90,15 +103,25 @@ them instead, each taking a minimum and a maximum:
 
 ``--height MIN MAX``
    The shared vertical axis (height, or gate distance for the raw scan
-   kinds' history image). Always applicable.
+   kinds' history image). Not used for ppi, which has no height axis.
 ``--dist MIN MAX``
-   The horizontal distance axis. Only used for RHI profiles.
+   The horizontal distance axis of rhi plots (MIN can be negative). For
+   ppi only MAX is used: both axes then span -MAX .. +MAX.
 ``--speed MIN MAX``
    The wind-speed / radial-velocity axis or colour range. Used wherever
    speed is plotted (not in the raw scan kinds' intensity/beta history).
 
-If ``--dist`` or ``--speed`` don't apply to the selected kind and mode,
-``haloplot`` prints a warning and ignores them.
+If one of these doesn't apply to the selected kind and mode,
+``haloplot`` prints a warning and ignores it.
+
+Fill
+----
+
+``--fill`` (rhi and ppi only) fills the area between the data points by
+nearest-neighbour interpolation instead of drawing one dot per point.
+Only the area inside the outline of the data points is filled, and
+points removed by ``--filter`` stay blank. For other modes it is
+ignored with a warning.
 
 Intensity filter
 ----------------
@@ -114,7 +137,7 @@ What gets blanked depends on the kind:
 * ``VAD``, ``Stare``, ``Wind_Profile`` and ``RHI`` history: intensity
   and beta of every gate below the threshold. The gates are dropped
   before time binning, so a bin that only held such gates stays blank.
-* ``RHI`` profile: radial velocity and beta of those points.
+* rhi and ppi plots: radial velocity and beta of those points.
 * ``Processed_Wind_Profile`` (profile and history): wind speed and
   direction. These files carry no intensity of their own, so it is
   taken from the ``Wind_Profile`` scan file with the same system id and
@@ -184,8 +207,16 @@ Examples
    haloplot Proc/2026/202609 --kind RHI \
        --start 24h --time "2026-09-19 12:00" -p rhi_24h.png
 
-   # fix axis ranges instead of autoscaling (--dist/--speed warn, but
-   # don't fail, if they don't apply to the selected kind/mode)
+   # a single RHI scan (the default for one RHI file), filled, with
+   # fixed distance and height ranges
+   haloplot RHI_77_20260921_000812.hpl --fill \
+       --dist -2000 6000 --height 0 3000 -p rhi.png
+
+   # a single VAD scan in the horizontal plane, +-2 km
+   haloplot VAD_77_20260921_000721.hpl --mode ppi --dist 0 2000 -p ppi.png
+
+   # fix axis ranges instead of autoscaling (--height/--dist/--speed warn,
+   # but don't fail, if they don't apply to the selected kind/mode)
    haloplot some_profile.hpl --height 0 3000 --speed 0 20 -p profile.png
 
    # hide low-signal data: "True" uses the default threshold 1.018,

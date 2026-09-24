@@ -8,12 +8,13 @@ single scan's height/speed/direction profile, or many combined into a
 height/time History image), and the raw regular-scan kinds --
 **VAD**, **Stare**, **Wind Profile** and **RHI** -- each of which gets
 a distance/time intensity+beta History image built from their raw
-per-gate data (no instrument-processed profile of their own). **RHI**
-additionally gets its own **Profile** mode: a single scan's
-distance/height cross section (radial velocity and beta), the only
-other kind besides Processed Wind Profile with one. Any other kind
-found on disk is still listed (so you can see what's in your data
-tree) but reported as not yet implemented.
+per-gate data (no instrument-processed profile of their own), plus two
+single-scan views of radial velocity and beta: **RHI** (the scan's
+points projected onto the vertical plane along the first ray's
+azimuth) and **PPI** (projected onto the horizontal plane), each drawn
+as dots or, optionally, filled by nearest-neighbour interpolation.
+Any other kind found on disk is still listed (so you can see what's in
+your data tree) but reported as not yet implemented.
 
 ## Installation
 
@@ -24,8 +25,8 @@ conda env create -f environment.yml
 conda activate haloviewer
 ```
 
-This only adds `numpy`, `pandas` and `matplotlib` on top of a base
-Python; the GUI toolkit (Tkinter) ships with the standard `python`
+This only adds `numpy`, `pandas`, `matplotlib` and `scipy` on top of a
+base Python; the GUI toolkit (Tkinter) ships with the standard `python`
 conda package on Linux, macOS and Windows, so nothing extra is needed
 for the GUI itself. Tested against Python 3.9+ on Ubuntu 22.04, 24.04
 and 26.04, macOS and Windows.
@@ -58,9 +59,9 @@ page in the full documentation (see below).
 
 **Graphic viewer -- `haloviewer`.**
 A Tkinter desktop application for browsing a `Proc` tree: pick a
-directory, a file kind and *Profile* or *History* mode, then step
-through single files or whole time windows, with adjustable height,
-distance and speed ranges.
+directory, a file kind and a plot type (*Profile*, *History*, *RHI* or
+*PPI*), then step through single files or whole time windows, with
+adjustable height, distance and speed ranges.
 
 ```bash
 haloviewer /path/to/Data/Proc
@@ -139,17 +140,19 @@ all implemented; a user-defined pattern (`User1`...`User5` in the raw
 the same recipe:
 
 1. Add a reader to `data.py` that turns a parsed `hpl.DataFile` (or a
-   set of them) into plain arrays.
+   set of them) into plain arrays. A regular scan file can usually
+   reuse `load_scan_history` and `load_scan_points` as they are.
 2. Add drawing function(s) to `plotting.py` that take those arrays and
    axes/figure objects -- reuse `create_timeseries_figure`'s two
-   stacked, colour-mapped panels if that shape fits; that's what all
-   three History flavours and RHI's own Profile scatter share.
+   stacked, colour-mapped panels (all History flavours) or
+   `create_scan_pair_figure`'s two side-by-side panels (the RHI/PPI
+   views) if one of those shapes fits.
 3. Register the kind's capabilities in `scan.KIND_CAPABILITIES`
    (`supported=True`, its plot modes).
 4. Wire the new mode(s) into `api.plot_file`/`plot_files`, and into
-   `gui.HaloViewerApp._plot_kind` (which of the four load/render
+   `gui.HaloViewerApp._plot_kind` (which of the five load/render
    pipelines applies) and `_update_range_controls_enabled` (which of
-   Height/Distance/Speed make sense for it).
+   Height/Distance/Speed/Fill make sense for it).
 
 The GUI will then automatically offer that kind and mode as soon as it
 is discovered on disk -- no other GUI changes are needed.

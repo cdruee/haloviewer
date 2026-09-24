@@ -29,7 +29,7 @@ __all__ = [
     'ProfileData', 'ProfileSeriesData',
     'load_profile', 'load_profile_series',
     'ScanHistoryData', 'load_scan_history',
-    'RhiCrossSectionData', 'load_rhi_cross_section',
+    'ScanPointsData', 'load_scan_points',
 ]
 
 
@@ -393,7 +393,7 @@ def load_profile_series(paths: Iterable,
 
 # =========================================================================
 # Regular scan files (VAD, Stare, RHI, Wind_Profile): raw intensity/beta
-# "history", and RHI's own distance/height cross section.
+# "history", and a single scan's points in 3-D for the RHI/PPI views.
 # =========================================================================
 
 
@@ -405,13 +405,14 @@ def _gate_distance_axis(gate_length: float, n_gates: int) -> np.ndarray:
     return (np.arange(n_gates) + 0.5) * gate_length
 
 
-def _tilt_corrected_unit_components(
+def _tilt_corrected_unit_vector(
         azimuth: float, elevation: float,
-        pitch: Optional[float], roll: Optional[float]) -> Tuple[float, float]:
+        pitch: Optional[float], roll: Optional[float]
+        ) -> Tuple[float, float, float]:
     """
     Convert one ray's nominal (azimuth, elevation) pointing direction
     plus the instrument's own (pitch, roll) tilt into a true, level-
-    frame unit pointing vector's horizontal and vertical components.
+    frame unit pointing vector ``(east, north, up)``.
 
     ``azimuth``/``elevation`` are the ray's recorded angles (elevation
     up from the horizon, azimuth clockwise from north); ``pitch``/
@@ -427,10 +428,9 @@ def _tilt_corrected_unit_components(
     even though these particular pitch/roll values are typically well
     under a degree.
 
-    :returns: ``(horizontal, vertical)`` components of the corrected \
-        unit vector (``horizontal**2 + vertical**2 == 1``); multiply \
-        each by the along-beam range to get horizontal distance and \
-        height.
+    :returns: ``(east, north, up)`` components of the corrected unit \
+        vector; multiply by the along-beam range to get the point's \
+        position relative to the instrument.
     """
     az = np.deg2rad(float(azimuth))
     el = np.deg2rad(float(elevation))
@@ -452,9 +452,22 @@ def _tilt_corrected_unit_components(
     y2 = y1
     z2 = -x1 * np.sin(r) + z1 * np.cos(r)
 
-    horizontal = float(np.hypot(x2, y2))
-    vertical = float(z2)
-    return horizontal, vertical
+    return float(x2), float(y2), float(z2)
+
+
+def _tilt_corrected_unit_components(
+        azimuth: float, elevation: float,
+        pitch: Optional[float], roll: Optional[float]) -> Tuple[float, float]:
+    """
+    Horizontal and vertical components of
+    :func:`_tilt_corrected_unit_vector`.
+
+    :returns: ``(horizontal, vertical)`` components of the corrected \
+        unit vector (``horizontal**2 + vertical**2 == 1``).
+    """
+    east, north, up = _tilt_corrected_unit_vector(
+        azimuth, elevation, pitch, roll)
+    return float(np.hypot(east, north)), float(up)
 
 
 @dataclass
@@ -601,34 +614,57 @@ def load_scan_history(paths: Iterable,
 
 
 @dataclass
-class RhiCrossSectionData:
-    """One RHI scan's vertical cross section: every (gate, ray) point's
-    horizontal distance and height (from
-    :func:`_tilt_corrected_unit_components`, using that ray's own
-    azimuth/elevation/pitch/roll), paired with its radial velocity
-    (Doppler) and backscatter (beta). Points from different rays don't
-    share a common distance/height grid the way a fixed-geometry scan
-    would, so this is plotted as individual points, not gridded."""
+class ScanPointsData:
+    """One regular scan's (gate, ray) points in a level, instrument-
+    centred Cartesian frame, rotated so that its horizontal axes follow
+    the scan's own first ray, paired with each point's radial velocity
+    (Doppler) and backscatter (beta). This is what the RHI and PPI
+    views project from: RHI shows ``(x, z)``, PPI shows ``(x, y)``.
+
+    The frame:
+
+    * ``x`` -- horizontal, pointing along :attr:`azimuth0`, the
+      (recorded) azimuth of the scan's first ray. A point on a ray
+      whose azimuth is more than 90 degrees away from :attr:`azimuth0`
+      (e.g. the far side of an over-the-top RHI, or the back half of a
+      VAD cone) therefore has a *negative* ``x``.
+    * ``y`` -- horizontal, 90 degrees counter-clockwise from ``x``
+      seen from above (i.e. towards azimuth ``azimuth0 - 90``), so
+      ``(x, y, z)`` is right-handed and a PPI plot is an ordinary
+      map view rotated so that ``azimuth0`` points to the right.
+    * ``z`` -- height above the instrument.
+
+    Each ray's own azimuth, elevation, pitch and roll give its pointing
+    vector (:func:`_tilt_corrected_unit_vector`); points from different
+    rays don't share a common grid, so this is plotted as individual
+    points (or, optionally, nearest-neighbour filled -- see
+    :mod:`haloviewer.plotting`), not gridded.
+    """
     timestamp: pd.Timestamp
-    distance: np.ndarray
-    height: np.ndarray
+    x: np.ndarray
+    y: np.ndarray
+    z: np.ndarray
     velocity: np.ndarray
     beta: np.ndarray
     path: Path
+    #: azimuth (degrees, clockwise from north) the ``x`` axis points to
+    azimuth0: float = 0.0
     #: intensity (SNR + 1) of every point, unfiltered
     intensity: Optional[np.ndarray] = None
 
 
-def load_rhi_cross_section(path, intensity_min: Optional[float] = None
-                           ) -> RhiCrossSectionData:
+def load_scan_points(path, intensity_min: Optional[float] = None
+                     ) -> ScanPointsData:
     """
-    Load a single RHI scan file and compute its distance/height cross
-    section: horizontal distance and height for every range gate of
-    every ray, from that ray's own azimuth, elevation, pitch and roll
-    (:func:`_tilt_corrected_unit_components`), paired with that gate's
-    radial velocity (Doppler) and backscatter (beta).
+    Load a single regular scan file (VAD, Stare, RHI or Wind_Profile)
+    and compute every (gate, ray) point's position in the frame
+    described in :class:`ScanPointsData`: from that ray's own azimuth,
+    elevation, pitch and roll (:func:`_tilt_corrected_unit_vector`)
+    and the gate's centre range (:func:`_gate_distance_axis`), rotated
+    so that ``x`` points along the first ray's azimuth. Each point is
+    paired with its radial velocity (Doppler) and backscatter (beta).
 
-    :param path: path to an ``RHI_*.hpl`` file.
+    :param path: path to a regular scan ``.hpl`` file.
     :param intensity_min: optional intensity filter threshold: \
         velocity and beta of points whose intensity is below it are \
         set to ``nan`` (the points keep their position, so the arrays \
@@ -637,24 +673,34 @@ def load_rhi_cross_section(path, intensity_min: Optional[float] = None
     """
     path = Path(path)
     f = hpl.DataFile(str(path))
-    if not f.rays:
+    rays = [r for r in f.rays if len(r.data.index)] if f.rays else []
+    if not rays:
         raise ValueError(f'{path} contains no scan (ray) data')
     gate_length = float(f.header.get('gatelength') or 1.0) if f.header else 1.0
 
-    distances: List[np.ndarray] = []
-    heights: List[np.ndarray] = []
+    azimuth0 = float(rays[0].azimuth) if rays[0].azimuth is not None else 0.0
+    a0 = np.deg2rad(azimuth0)
+    # unit vectors of the x (towards azimuth0) and y (towards
+    # azimuth0 - 90) axes in east/north components
+    ex = (np.sin(a0), np.cos(a0))
+    ey = (-np.cos(a0), np.sin(a0))
+
+    xs: List[np.ndarray] = []
+    ys: List[np.ndarray] = []
+    zs: List[np.ndarray] = []
     velocities: List[np.ndarray] = []
     betas: List[np.ndarray] = []
     intensities: List[np.ndarray] = []
-    for r in f.rays:
+    for r in rays:
         ng = len(r.data.index)
-        if ng == 0:
-            continue
         gate_range = _gate_distance_axis(gate_length, ng)
-        horiz, vert = _tilt_corrected_unit_components(
-            r.azimuth, r.elevation, r.pitch, r.roll)
-        distances.append(gate_range * horiz)
-        heights.append(gate_range * vert)
+        east, north, up = _tilt_corrected_unit_vector(
+            r.azimuth if r.azimuth is not None else 0.0,
+            r.elevation if r.elevation is not None else 0.0,
+            r.pitch, r.roll)
+        xs.append(gate_range * (east * ex[0] + north * ex[1]))
+        ys.append(gate_range * (east * ey[0] + north * ey[1]))
+        zs.append(gate_range * up)
         velocities.append(
             pd.to_numeric(r.data['Doppler'], errors='coerce').to_numpy())
         betas.append(
@@ -666,12 +712,12 @@ def load_rhi_cross_section(path, intensity_min: Optional[float] = None
         return np.concatenate(parts).astype(float) if parts else np.array([])
 
     intensity = _cat(intensities)
-    return RhiCrossSectionData(
+    return ScanPointsData(
         timestamp=f.timestamp,
-        distance=_cat(distances),
-        height=_cat(heights),
+        x=_cat(xs), y=_cat(ys), z=_cat(zs),
         velocity=_mask_below(_cat(velocities), intensity, intensity_min),
         beta=_mask_below(_cat(betas), intensity, intensity_min),
         path=path,
+        azimuth0=azimuth0,
         intensity=intensity,
     )

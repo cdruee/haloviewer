@@ -41,16 +41,20 @@ def test_scan_directory_classifies_and_skips(proc_tree):
 def test_kind_capabilities():
     info = get_kind_info("Processed_Wind_Profile")
     assert info.supported
-    assert "profile" in info.modes and "timeseries" in info.modes
+    # Processed Wind Profile: Profile + History, never RHI/PPI
+    assert set(info.modes) == {"profile", "timeseries"}
 
     for kind in ("VAD", "Stare", "Wind_Profile"):
         raw = get_kind_info(kind)
         assert raw.supported
-        assert raw.modes == ("timeseries",)
+        assert raw.modes[0] == "timeseries"   # History stays the default
+        assert set(raw.modes) == {"timeseries", "rhi", "ppi"}
 
     rhi = get_kind_info("RHI")
     assert rhi.supported
-    assert set(rhi.modes) == {"profile", "timeseries"}
+    # RHI files: no Profile any more; the RHI view is the default
+    assert rhi.modes[0] == "rhi"
+    assert set(rhi.modes) == {"rhi", "timeseries", "ppi"}
 
     unknown = get_kind_info("Something_Else")
     assert not unknown.supported

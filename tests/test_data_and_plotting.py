@@ -154,8 +154,8 @@ def test_speed_autoscale_is_capped():
 
 
 # =========================================================================
-# Raw scan kinds (VAD/Stare/Wind_Profile/RHI): scan history and RHI's
-# own distance/height cross section.
+# Raw scan kinds (VAD/Stare/Wind_Profile/RHI): scan history. The
+# single-scan RHI/PPI views are tested in test_rhi_ppi.py.
 # =========================================================================
 
 def test_tilt_corrected_unit_components_sanity():
@@ -204,21 +204,6 @@ def test_load_scan_history_shape_and_nan_gaps():
     assert padded.distance.size == n_dist
 
 
-def test_load_rhi_cross_section_matches_ray_geometry():
-    cross = data.load_rhi_cross_section(_RHI_FILE)
-    f = hpl.DataFile(str(_RHI_FILE))
-    n_gates = len(f.rays[0].data.index)
-    assert cross.distance.shape == (len(f.rays) * n_gates,)
-    assert cross.height.shape == cross.distance.shape
-    assert cross.velocity.shape == cross.distance.shape
-    assert cross.beta.shape == cross.distance.shape
-    # distances/heights must be finite and physically bounded by the
-    # farthest gate's range (gate length * gate count)
-    max_range = float(f.header["gatelength"]) * n_gates
-    assert np.nanmax(np.abs(cross.distance)) <= max_range + 1e-6
-    assert np.nanmax(np.abs(cross.height)) <= max_range + 1e-6
-
-
 def test_plot_scan_history_runs_and_axes_are_reusable():
     hist = data.load_scan_history([_VAD_FILE])
     fig, (ax_int, ax_beta, cax_int, cax_beta) = \
@@ -231,30 +216,6 @@ def test_plot_scan_history_runs_and_axes_are_reusable():
     pos_after = ax_int.get_position().bounds
     assert pos_before == pos_after
     assert ax_int.collections and ax_beta.collections
-
-
-def test_plot_rhi_cross_section_runs_as_scatter():
-    cross = data.load_rhi_cross_section(_RHI_FILE)
-    fig, (ax_vel, ax_beta, cax_vel, cax_beta) = \
-        plotting.create_timeseries_figure()
-    plotting.plot_rhi_cross_section(ax_vel, ax_beta, cax_vel, cax_beta,
-                                     cross.distance, cross.height,
-                                     cross.velocity, cross.beta,
-                                     title="RHI test")
-    # a scatter (PathCollection), not a gridded pcolormesh -- RHI rays
-    # don't share a common grid the way a fixed scan geometry would
-    assert len(ax_vel.collections[0].get_offsets()) == len(cross.distance)
-
-
-def test_plot_rhi_cross_section_speed_vlim_is_symmetric_by_default():
-    cross = data.load_rhi_cross_section(_RHI_FILE)
-    fig, (ax_vel, ax_beta, cax_vel, cax_beta) = \
-        plotting.create_timeseries_figure()
-    plotting.plot_rhi_cross_section(ax_vel, ax_beta, cax_vel, cax_beta,
-                                     cross.distance, cross.height,
-                                     cross.velocity, cross.beta)
-    vmin, vmax = ax_vel.collections[0].get_clim()
-    assert vmin == -vmax
 
 
 # =========================================================================

@@ -13,8 +13,8 @@
 # - GUI toolkit is Tkinter, which ships as part of the standard "python"
 #   conda package on Linux, macOS and Windows (via its "tk" dependency),
 #   so no extra GUI package is required.
-# - Only numpy, pandas and matplotlib are added on top of a base
-#   miniconda install.
+# - Only numpy, pandas, matplotlib and scipy (nearest-neighbour "Fill"
+#   of the RHI/PPI views) are added on top of a base miniconda install.
 name: haloviewer
 channels:
   - conda-forge
@@ -23,6 +23,7 @@ dependencies:
   - numpy
   - pandas
   - matplotlib
+  - scipy
   - pip
   - pip:
       - -e .
