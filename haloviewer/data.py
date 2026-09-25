@@ -397,12 +397,63 @@ def load_profile_series(paths: Iterable,
 # =========================================================================
 
 
-def _gate_distance_axis(gate_length: float, n_gates: int) -> np.ndarray:
-    """Range-gate-center distance (m) along the beam for ``n_gates``
-    gates of ``gate_length`` metres each -- gate 0's center sits half a
-    gate length out, matching the "Range of measurement (center of
-    gate)" convention noted in the ``.hpl`` header."""
-    return (np.arange(n_gates) + 0.5) * gate_length
+def _gate_range(gate_index, gate_length: float,
+                gate_points: float = 1.0) -> np.ndarray:
+    """
+    Along-beam range (m) of the centre of range gate(s) ``gate_index``,
+    following the Halo convention stated in the ``.hpl`` header::
+
+        range = gate_length / 2 + gate_index * gate_length / gate_points
+
+    with ``gate_length`` the ``Range gate length (m)`` and
+    ``gate_points`` the ``Gate length (pts)`` header value. Gates are
+    ``gate_length / gate_points`` metres apart, i.e. neighbouring gates
+    overlap when ``gate_points > 1``; gate 0's centre sits half a gate
+    length out.
+    """
+    if not gate_points or gate_points <= 0:
+        gate_points = 1.0
+    idx = np.asarray(gate_index, dtype=float)
+    return gate_length / 2.0 + idx * (gate_length / gate_points)
+
+
+def _gate_distance_axis(gate_length: float, n_gates: int,
+                        gate_points: float = 1.0) -> np.ndarray:
+    """Range-gate-centre distance (m) of gates ``0 .. n_gates - 1``; see
+    :func:`_gate_range` for the formula."""
+    return _gate_range(np.arange(n_gates), gate_length, gate_points)
+
+
+def _header_gate_geometry(header) -> Tuple[Optional[float], float]:
+    """``(gate_length_m, gate_points)`` from a parsed header:
+    ``Range gate length (m)`` (``None`` if missing) and
+    ``Gate length (pts)`` (``1`` if missing or unusable, i.e. gates
+    spaced one full gate length apart)."""
+    if not header:
+        return None, 1.0
+    gate_length = None
+    try:
+        gate_length = float(header.get('gatelength')) or None
+    except (TypeError, ValueError):
+        pass
+    try:
+        gate_points = float(header.get('gatepoints'))
+        if not gate_points > 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        gate_points = 1.0
+    return gate_length, gate_points
+
+
+def _ray_gate_index(ray) -> np.ndarray:
+    """Gate indices of one ray's rows: its ``Range Gate`` column where
+    present and usable, else ``0 .. n - 1``."""
+    n = len(ray.data.index)
+    if 'Range Gate' in ray.data.columns:
+        idx = pd.to_numeric(ray.data['Range Gate'], errors='coerce').to_numpy()
+        if np.isfinite(idx).all():
+            return idx.astype(float)
+    return np.arange(n, dtype=float)
 
 
 def _tilt_corrected_unit_vector(
@@ -531,8 +582,9 @@ def load_scan_history(paths: Iterable,
     azimuths/elevations, and a time range spans many files); instead
     every ray's per-gate intensity/beta is averaged into "round" time
     bins (:func:`_pick_history_bin_seconds`) against a distance axis
-    taken directly from the range gates (gate index and the first
-    file's ``Range gate length (m)`` -- see :func:`_gate_distance_axis`).
+    taken directly from the range gates (gate index, and the first
+    file's ``Range gate length (m)`` and ``Gate length (pts)`` -- see
+    :func:`_gate_range`).
     A bin with no ray falling into it is left as ``nan``; the plotting
     layer then leaves the corresponding pixels empty (background)
     rather than interpolating across the gap.
@@ -561,15 +613,15 @@ def load_scan_history(paths: Iterable,
     if not files:
         raise ValueError('no scan (ray) data found in the given files')
 
-    gate_length = 1.0
+    gate_length, gate_points = 1.0, 1.0
     for f in files:
-        gl = f.header.get('gatelength') if f.header else None
+        gl, gp = _header_gate_geometry(f.header)
         if gl:
-            gate_length = float(gl)
+            gate_length, gate_points = gl, gp
             break
     n_gates = max((len(r.data.index) for f in files for r in f.rays),
                   default=0)
-    distance = _gate_distance_axis(gate_length, n_gates)
+    distance = _gate_distance_axis(gate_length, n_gates, gate_points)
 
     ray_times = pd.DatetimeIndex([r.time for f in files for r in f.rays])
     t0 = ray_times.min()
@@ -660,7 +712,7 @@ def load_scan_points(path, intensity_min: Optional[float] = None
     and compute every (gate, ray) point's position in the frame
     described in :class:`ScanPointsData`: from that ray's own azimuth,
     elevation, pitch and roll (:func:`_tilt_corrected_unit_vector`)
-    and the gate's centre range (:func:`_gate_distance_axis`), rotated
+    and the gate's centre range (:func:`_gate_range`), rotated
     so that ``x`` points along the first ray's azimuth. Each point is
     paired with its radial velocity (Doppler) and backscatter (beta).
 
@@ -676,7 +728,8 @@ def load_scan_points(path, intensity_min: Optional[float] = None
     rays = [r for r in f.rays if len(r.data.index)] if f.rays else []
     if not rays:
         raise ValueError(f'{path} contains no scan (ray) data')
-    gate_length = float(f.header.get('gatelength') or 1.0) if f.header else 1.0
+    gate_length, gate_points = _header_gate_geometry(f.header)
+    gate_length = gate_length or 1.0
 
     azimuth0 = float(rays[0].azimuth) if rays[0].azimuth is not None else 0.0
     a0 = np.deg2rad(azimuth0)
@@ -692,8 +745,8 @@ def load_scan_points(path, intensity_min: Optional[float] = None
     betas: List[np.ndarray] = []
     intensities: List[np.ndarray] = []
     for r in rays:
-        ng = len(r.data.index)
-        gate_range = _gate_distance_axis(gate_length, ng)
+        gate_range = _gate_range(_ray_gate_index(r), gate_length,
+                                 gate_points)
         east, north, up = _tilt_corrected_unit_vector(
             r.azimuth if r.azimuth is not None else 0.0,
             r.elevation if r.elevation is not None else 0.0,

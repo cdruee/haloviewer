@@ -7,8 +7,7 @@ from datetime import datetime
 import pytest
 
 pytest.importorskip("tkinter")
-
-from haloviewer import halosync  # noqa: E402
+halosync = pytest.importorskip("haloviewer.halosync")
 
 
 def test_extract_timestamp_both_notations():

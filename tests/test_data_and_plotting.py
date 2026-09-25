@@ -181,8 +181,19 @@ def test_tilt_corrected_unit_components_sanity():
 
 
 def test_gate_distance_axis_is_gate_center():
+    # without Gate length (pts): gates one full gate length apart
     distance = data._gate_distance_axis(gate_length=18.0, n_gates=3)
     assert list(distance) == [9.0, 27.0, 45.0]
+    # header: "Range of measurement (center of gate) = Gate length / 2 +
+    # (range gate x 3)" for 18 m / 6 pts
+    distance = data._gate_distance_axis(18.0, 3, gate_points=6)
+    assert list(distance) == [9.0, 12.0, 15.0]
+
+
+def test_scan_history_uses_gate_points_from_header():
+    hist = data.load_scan_history([_VAD_FILE])   # 18 m, 6 pts
+    assert hist.distance[0] == pytest.approx(9.0)
+    assert np.allclose(np.diff(hist.distance), 3.0)
 
 
 def test_load_scan_history_shape_and_nan_gaps():

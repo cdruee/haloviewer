@@ -97,14 +97,30 @@ History
    distance-vs-time image of the raw per-gate data, two panels stacked
    vertically: intensity (SNR + 1) on top using the ``cividis``
    colormap, attenuated backscatter (beta) below using ``magma``. The
-   vertical axis is distance inferred purely from range gates (gate
-   index × gate length), not scan geometry -- individual rays are
+   vertical axis is distance inferred purely from range gates (see
+   `Range of a gate`_ below), not scan geometry -- individual rays are
    never plotted; instead all rays across the loaded files are
    averaged into "round" time bins (10s, 15s, 30s, 1 min, ... up to a
    week) sized so the image is roughly 100-250 pixels wide regardless
    of how long a span is selected. A time bin with no rays in it is
    left as ``NaN``, which renders as blank background rather than an
    interpolated guess.
+
+Range of a gate
+~~~~~~~~~~~~~~~
+
+The along-beam range of a data point is the centre of its range gate,
+following the convention stated in every ``.hpl`` header:
+
+.. math::
+
+   r = \frac{L}{2} + i \cdot \frac{L}{n}
+
+with *i* the range gate index, *L* the ``Range gate length (m)`` and *n*
+the ``Gate length (pts)`` header value. Neighbouring gates are therefore
+*L*/*n* metres apart and overlap when *n* > 1; e.g. 18 m gates of 6 points
+are centred at 9, 12, 15, ... m. If the header has no
+``Gate length (pts)``, *n* = 1 is assumed.
 
 RHI and PPI
 ~~~~~~~~~~~
@@ -117,7 +133,7 @@ deficiency), attenuated backscatter (beta) on the right using
 ``magma``. Each data point is one range gate along one ray, drawn as a
 colour-coded dot at its true position, computed from that ray's own
 azimuth and elevation, the instrument's pitch/roll tilt correction,
-and the gate's centre range.
+and the gate's centre range (see `Range of a gate`_).
 
 Positions are given in a level, instrument-centred frame that is
 rotated to follow the scan itself:
