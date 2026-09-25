@@ -120,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--fill', action='store_true',
         help='rhi/ppi only: fill the area between the data points by '
-             'nearest-neighbour interpolation instead of drawing dots')
+             'inverse-distance-weighted interpolation instead of drawing dots')
     parser.add_argument(
         '-p', '--plot', dest='output', metavar='PATH',
         help='save the figure to PATH (format inferred from the '

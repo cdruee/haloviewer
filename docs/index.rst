@@ -16,7 +16,7 @@ per-gate data (no instrument-processed profile of their own), plus two
 single-scan views of radial velocity and beta: **RHI** (the scan's
 points projected onto the vertical plane along the first ray's
 azimuth) and **PPI** (projected onto the horizontal plane), each drawn
-as dots or, optionally, filled by nearest-neighbour interpolation.
+as dots or, optionally, filled by inverse-distance-weighted interpolation.
 Any other kind found on disk is still listed (so you can see what's in
 your data tree) but reported as not yet implemented.
 

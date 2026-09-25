@@ -134,7 +134,7 @@ _DISTANCE_APPLICABLE = {'rhi', 'ppi'}
 #: the raw scan kinds' History image has no such dimension (its panels
 #: are intensity and beta).
 _SPEED_APPLICABLE = {'wind_profile', 'wind_timeseries', 'rhi', 'ppi'}
-#: `fill` (nearest-neighbour fill between points) only applies to the
+#: `fill` (inverse-distance-weighted fill between points) only applies to the
 #: scattered-point RHI/PPI views.
 _FILL_APPLICABLE = {'rhi', 'ppi'}
 
@@ -272,7 +272,7 @@ def plot_file(path: PathLike, *,
         the same timestamp (a warning is issued for profiles that have \
         none, which are then left unfiltered).
     :param fill: ``"rhi"``/``"ppi"`` only: fill the area between the \
-        data points by nearest-neighbour interpolation instead of \
+        data points by inverse-distance-weighted interpolation instead of \
         drawing individual points (needs :mod:`scipy`).
     :returns: the :class:`~matplotlib.figure.Figure` that was drawn.
     """
@@ -593,7 +593,7 @@ def plot(path: Union[PathLike, Iterable[PathLike]], *,
         ``True`` (threshold \
         :data:`~haloviewer.data.DEFAULT_INTENSITY_FILTER` = 1.018) or a \
         threshold value; see :func:`plot_file`.
-    :param fill: ``"rhi"``/``"ppi"`` only: nearest-neighbour fill \
+    :param fill: ``"rhi"``/``"ppi"`` only: inverse-distance-weighted fill \
         between the data points; see :func:`plot_file`.
     :returns: the :class:`~matplotlib.figure.Figure` that was drawn.
     :raises ValueError: if no files are found, if they span more than \

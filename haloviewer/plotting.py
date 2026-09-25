@@ -54,6 +54,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 __all__ = [
     'SPEED_CMAP', 'DIRECTION_CMAP', 'INTENSITY_CMAP', 'BETA_CMAP',
     'VELOCITY_CMAP', 'MAX_AUTOSCALE_SPEED', 'FILL_GRID_SIZE',
+    'FILL_NEIGHBOURS', 'FILL_POWER',
     'create_profile_figure', 'plot_wind_profile',
     'create_timeseries_figure', 'plot_wind_timeseries',
     'plot_scan_history',
@@ -81,7 +82,7 @@ MAX_AUTOSCALE_SPEED = 50.0
 _DIRECTION_WRAP_THRESHOLD = 180.0
 
 #: Number of cells along each axis of the grid the RHI/PPI "Fill"
-#: option paints (see :func:`_nearest_fill`).
+#: option paints (see :func:`_idw_fill`).
 FILL_GRID_SIZE = 400
 
 
@@ -436,7 +437,7 @@ def plot_scan_history(
 # x pointing along the first ray's azimuth (see
 # data.ScanPointsData). Radial velocity and beta side by side, each
 # either as colour-coded scatter points or -- with ``fill`` -- as a
-# nearest-neighbour filled image.
+# inverse-distance-weighted filled image.
 # =========================================================================
 
 def create_scan_pair_figure(
@@ -499,23 +500,97 @@ def _convex_hull(points: np.ndarray) -> np.ndarray:
     return np.array(lower[:-1] + upper[:-1])
 
 
-def _nearest_fill(px: np.ndarray, py: np.ndarray,
-                  values: Sequence[np.ndarray],
-                  xlim: Tuple[float, float], ylim: Tuple[float, float],
-                  n: int = FILL_GRID_SIZE):
+#: Number of nearest data points each filled cell averages over (see
+#: :func:`_idw_fill`).
+FILL_NEIGHBOURS = 8
+
+#: Exponent of the inverse-distance weights (``w = 1 / d**p``) used by
+#: :func:`_idw_fill`; 2 is the common Shepard choice.
+FILL_POWER = 2.0
+
+
+def _polar_grid_steps(px: np.ndarray, py: np.ndarray
+                      ) -> Optional[Tuple[float, float]]:
     """
-    Nearest-neighbour interpolation of scattered points onto a regular
-    grid, for the RHI/PPI "Fill" option.
+    Estimate the natural grid spacing of scan points in polar
+    coordinates around the instrument (the origin of the plotted
+    plane): ``(range_step, angle_step)`` -- the typical distance between
+    neighbouring gates along a ray (m) and between neighbouring rays
+    (radians). Used by :func:`_idw_fill` to measure distances in units
+    of these steps.
+
+    Points are grouped into rays by their (rounded) angle; the range
+    step is the median spacing of successive ranges within those rays,
+    the angle step the median spacing of successive distinct ray angles.
+
+    :returns: the two steps, or ``None`` if either can't be estimated \
+        (e.g. fewer than two distinct rays).
+    """
+    r = np.hypot(px, py)
+    th = np.arctan2(py, px)
+    ok = np.isfinite(r) & np.isfinite(th) & (r > 0)
+    if ok.sum() < 3:
+        return None
+    r, th = r[ok], th[ok]
+    key = np.round(th, 6)
+    order = np.lexsort((r, key))
+    r_s, key_s = r[order], key[order]
+    same_ray = key_s[1:] == key_s[:-1]
+    dr_all = np.diff(r_s)[same_ray]
+    dr_all = dr_all[dr_all > 0]
+    angles = np.unique(key)
+    if dr_all.size == 0 or angles.size < 2:
+        return None
+    dth_all = np.diff(angles)
+    dth_all = dth_all[dth_all > 1e-6]
+    if dth_all.size == 0:
+        return None
+    return float(np.median(dr_all)), float(np.median(dth_all))
+
+
+def _to_polar_units(xy: np.ndarray, dr: float, dth: float) -> np.ndarray:
+    """``(n, 2)`` Cartesian points -> ``(range / dr, angle / dth)``."""
+    return np.column_stack([np.hypot(xy[:, 0], xy[:, 1]) / dr,
+                            np.arctan2(xy[:, 1], xy[:, 0]) / dth])
+
+
+def _idw_fill(px: np.ndarray, py: np.ndarray,
+              values: Sequence[np.ndarray],
+              xlim: Tuple[float, float], ylim: Tuple[float, float],
+              n: int = FILL_GRID_SIZE, k: int = FILL_NEIGHBOURS,
+              power: float = FILL_POWER, polar: bool = True):
+    """
+    Inverse-distance-weighted (Shepard) interpolation of scattered
+    points onto a regular grid, for the RHI/PPI "Fill" option.
 
     The grid (``n`` x ``n`` cells) covers the part of the view
-    (``xlim`` x ``ylim``) that the data actually span; every cell
-    takes the value of the data point nearest to its centre. Cells
-    outside the convex hull of the data points are left ``nan``
-    (blank), so the fill doesn't smear the outermost values out over
-    regions the scan never looked at. A point whose value is ``nan``
-    (e.g. removed by the intensity filter) still "owns" its
-    neighbourhood, so filtered-out regions stay blank rather than
-    being papered over by their neighbours.
+    (``xlim`` x ``ylim``) that the data actually span. Every cell takes
+    the weighted mean of its ``k`` nearest data points, with weights
+    ``1 / d**power``; a cell centre that coincides with a data point
+    takes that point's value exactly. Cells outside the convex hull of
+    the data points are left ``nan`` (blank), so the fill doesn't smear
+    the outermost values out over regions the scan never looked at.
+
+    **Distance metric.** Lidar points are strongly anisotropic: along a
+    ray the gates are only a few metres apart, while neighbouring rays
+    can be tens of metres apart at long range. With plain Cartesian
+    distances, all ``k`` nearest points of a cell would lie on the same
+    (nearest) ray, so every ray would just fill its own wedge and the
+    result would look like a nearest-neighbour patchwork. With
+    ``polar=True`` (the default) the distance ``d`` is therefore
+    measured in the scan's own polar grid instead: range in units of
+    the gate spacing and angle (around the instrument, in the plotted
+    plane) in units of the ray spacing, both estimated from the data
+    (:func:`_polar_grid_steps`). The nearest points of a cell then come
+    from the rays on both sides of it, and the values blend smoothly
+    between rays as well as between gates. If the spacings can't be
+    estimated (e.g. a single ray), Cartesian distances are used.
+
+    Points whose value is ``nan`` (e.g. removed by the intensity
+    filter) are left out of the weighted mean, except that a cell whose
+    *nearest* point is such a ``nan`` point stays blank -- so
+    filtered-out regions stay blank rather than being papered over by
+    their neighbours.
 
     Needs :mod:`scipy` (``scipy.spatial.cKDTree``).
 
@@ -525,6 +600,11 @@ def _nearest_fill(px: np.ndarray, py: np.ndarray,
     :param xlim: ``(min, max)`` of the view in x.
     :param ylim: ``(min, max)`` of the view in y.
     :param n: grid cells per axis.
+    :param k: number of nearest points per cell (capped at the number \
+        of points).
+    :param power: exponent of the inverse-distance weights.
+    :param polar: measure distances in the scan's normalised polar \
+        grid (see above) rather than in metres.
     :returns: ``(extent, grids)`` -- ``extent`` is ``(x0, x1, y0, y1)`` \
         for :meth:`~matplotlib.axes.Axes.imshow` and ``grids`` a list \
         of ``(n, n)`` arrays (row 0 at ``y0``), one per ``values`` \
@@ -556,17 +636,54 @@ def _nearest_fill(px: np.ndarray, py: np.ndarray,
     mx, my = np.meshgrid(gx, gy)
     cells = np.column_stack([mx.ravel(), my.ravel()])
 
-    _, idx = cKDTree(pts).query(cells)
     # a tiny tolerance keeps cells whose centre sits exactly on the
     # hull boundary (e.g. along a straight outermost ray)
     span = max(x1 - x0, y1 - y0)
     inside = _MplPath(hull).contains_points(cells, radius=1e-9 * span) | \
         _MplPath(hull[::-1]).contains_points(cells, radius=1e-9 * span)
 
+    src = pts
+    query = cells[inside]
+    src_index = np.arange(len(pts))
+    tol = 1e-12 * span
+    steps = _polar_grid_steps(pts[:, 0], pts[:, 1]) if polar else None
+    if steps is not None:
+        dr, dth = steps
+        src = _to_polar_units(pts, dr, dth)
+        query = _to_polar_units(query, dr, dth)
+        # the angle wraps at +-180 deg: add copies of the points shifted
+        # by one full turn so cells near the seam of a full-circle scan
+        # find their neighbours on the other side
+        turn = 2.0 * np.pi / dth
+        src = np.vstack([src, src + [0.0, turn], src - [0.0, turn]])
+        src_index = np.concatenate([src_index] * 3)
+        tol = 1e-9
+
+    k = max(1, min(int(k), len(pts)))
+    dist, idx = cKDTree(src).query(query, k=k)
+    if k == 1:
+        dist, idx = dist[:, None], idx[:, None]
+    idx = src_index[idx]
+    # exact hits: give the coinciding point all the weight
+    exact = dist <= tol
+    with np.errstate(divide='ignore'):
+        weights = np.where(exact, 0.0, 1.0 / dist ** power)
+    hit = exact.any(axis=1)
+    weights[hit] = exact[hit].astype(float)
+
     grids = []
     for v in values:
-        g = np.asarray(v, dtype=float)[ok][idx]
-        g[~inside] = np.nan
+        vals = np.asarray(v, dtype=float)[ok][idx]      # (cells, k)
+        finite = np.isfinite(vals)
+        w = np.where(finite, weights, 0.0)
+        wsum = w.sum(axis=1)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            est = (np.where(finite, vals, 0.0) * w).sum(axis=1) / wsum
+        # blank where the nearest point is filtered out, or no finite
+        # neighbour carries any weight
+        est[~finite[:, 0] | ~(wsum > 0)] = np.nan
+        g = np.full(len(cells), np.nan)
+        g[inside] = est
         grids.append(g.reshape(n, n))
     return (x0, x1, y0, y1), grids
 
@@ -609,7 +726,7 @@ def _plot_scan_pair(ax_vel, ax_beta, cax_vel, cax_beta,
     filled = None
     if fill:
         try:
-            filled = _nearest_fill(h, v, [velocity, beta], xlim, ylim)
+            filled = _idw_fill(h, v, [velocity, beta], xlim, ylim)
         except ImportError:
             warnings.warn('fill needs scipy (not installed) -- drawing '
                           'the data points instead', stacklevel=3)
@@ -696,7 +813,7 @@ def plot_rhi(
         magnitude, capped like :data:`MAX_AUTOSCALE_SPEED`. Beta \
         always autoscales from its own data (see :func:`_auto_vlim`).
     :param fill: if ``True``, fill the area between the points by \
-        nearest-neighbour interpolation (see :func:`_nearest_fill`) \
+        inverse-distance-weighted interpolation (see :func:`_idw_fill`) \
         instead of drawing individual points.
     :param azimuth0: azimuth (degrees) the x axis points to, shown in \
         the axis label.

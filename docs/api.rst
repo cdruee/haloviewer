@@ -32,7 +32,7 @@ available directly from a script or notebook:
 
    # one scan projected onto the vertical ("rhi") or horizontal ("ppi")
    # plane, x along the first ray's azimuth; fill=True fills between the
-   # points by nearest-neighbour interpolation. For "ppi" only the max
+   # points by inverse-distance-weighted interpolation. For "ppi" only the max
    # of distance= is used (both axes span -max..+max).
    fig = haloviewer.plot("RHI_77_20260921_000812.hpl", mode="rhi",
                          fill=True, output="rhi.png")

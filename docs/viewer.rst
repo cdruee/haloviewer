@@ -163,12 +163,20 @@ Fill
 
 Next to the intensity filter is the **Fill** checkbox (enabled only for
 RHI and PPI). When it is ticked, the area between the data points is
-filled by nearest-neighbour interpolation: every pixel takes the value
-of the data point closest to it, so each point owns a small polygon
-around itself instead of a dot. Only the area inside the outline
-(convex hull) of the data points is filled; outside it the plot stays
-blank. Points blanked by the intensity filter keep their area blank as
-well, rather than being covered up by their neighbours. A scan whose
+filled by inverse-distance-weighted (Shepard) interpolation: every
+pixel takes the weighted mean of the 8 data points closest to it, each
+weighted by 1/*d*\ :sup:`2`. The distance *d* is measured in the scan's
+own polar grid -- range in units of the gate spacing, angle in units of
+the ray spacing -- rather than in metres. Gates along a ray are much
+closer together than neighbouring rays, so in metres all nearby points
+would come from the same ray and each ray would just paint its own
+wedge; measured this way, the colours blend smoothly between
+neighbouring gates *and* rays. Only
+the area inside the outline (convex hull) of the data points is filled;
+outside it the plot stays blank. Points blanked by the intensity filter
+are left out of the averages, and pixels whose closest data point was
+blanked stay blank too, so filtered-out areas are not covered up by
+their neighbours. A scan whose
 points all lie on one line in the plotted plane (e.g. a Stare scan in
 PPI) can't be filled and is drawn as dots. Toggling Fill only redraws
 -- no files are re-read.

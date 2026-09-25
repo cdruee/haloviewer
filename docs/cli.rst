@@ -118,7 +118,7 @@ Fill
 ----
 
 ``--fill`` (rhi and ppi only) fills the area between the data points by
-nearest-neighbour interpolation instead of drawing one dot per point.
+inverse-distance-weighted interpolation instead of drawing one dot per point.
 Only the area inside the outline of the data points is filled, and
 points removed by ``--filter`` stay blank. For other modes it is
 ignored with a warning.

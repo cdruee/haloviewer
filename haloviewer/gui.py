@@ -45,7 +45,7 @@ every data point whose intensity is below the entered threshold; see
 :meth:`HaloViewerApp._intensity_min` and the ``intensity_min`` argument
 of the :mod:`haloviewer.data` loaders. The "Fill" checkbox next to it
 (RHI/PPI only) fills the area between the data points by
-nearest-neighbour interpolation instead of drawing individual dots.
+inverse-distance-weighted interpolation instead of drawing individual dots.
 """
 
 from __future__ import annotations

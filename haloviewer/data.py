@@ -689,7 +689,7 @@ class ScanPointsData:
     Each ray's own azimuth, elevation, pitch and roll give its pointing
     vector (:func:`_tilt_corrected_unit_vector`); points from different
     rays don't share a common grid, so this is plotted as individual
-    points (or, optionally, nearest-neighbour filled -- see
+    points (or, optionally, inverse-distance-weighted filled -- see
     :mod:`haloviewer.plotting`), not gridded.
     """
     timestamp: pd.Timestamp
