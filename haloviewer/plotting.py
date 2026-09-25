@@ -701,6 +701,37 @@ def _data_range(values: np.ndarray, pad_frac: float = 0.0
     return lo - pad, hi + pad
 
 
+def _power_of_ten(lo: float, hi: float) -> int:
+    """Exponent ``N`` such that ``max(|lo|, |hi|) / 10**N`` lies in
+    [1, 10) -- ``0`` if both are zero or not finite."""
+    m = max(abs(lo), abs(hi))
+    if not np.isfinite(m) or m == 0:
+        return 0
+    return int(np.floor(np.log10(m)))
+
+
+def _apply_power_of_ten(cb, lo: float, hi: float, name: str,
+                        unit: str) -> str:
+    """
+    Label the ticks of colorbar ``cb`` (range ``lo`` .. ``hi``) as
+    ``value / 10**N`` in ``%4.1f`` format, with the factor moved into
+    the axis label instead of matplotlib's separate offset text, e.g.
+    ``"Beta (10⁻⁵ m⁻¹ sr⁻¹)"``. Only the tick *labels* are scaled; the
+    colour mapping and the data are untouched.
+
+    :returns: the label to set on the colorbar.
+    """
+    from matplotlib.ticker import FuncFormatter, MaxNLocator
+    n = _power_of_ten(lo, hi)
+    scale = 10.0 ** n
+    cb.locator = MaxNLocator(nbins=6)
+    cb.formatter = FuncFormatter(lambda v, _pos: f'{v / scale:4.1f}')
+    cb.update_ticks()
+    if n == 0:
+        return f'{name} ({unit})'
+    return f'{name} ($10^{{{n}}}$ {unit})'
+
+
 def _plot_scan_pair(ax_vel, ax_beta, cax_vel, cax_beta,
                     h: np.ndarray, v: np.ndarray,
                     velocity: np.ndarray, beta: np.ndarray, *,
@@ -750,7 +781,12 @@ def _plot_scan_pair(ax_vel, ax_beta, cax_vel, cax_beta,
         else:
             artist = ax.scatter(h, v, c=values, cmap=cmap, vmin=lo,
                                 vmax=hi, s=marker_size, linewidths=0)
-        fig.colorbar(artist, cax=cax, orientation='horizontal', label=label)
+        cb = fig.colorbar(artist, cax=cax, orientation='horizontal')
+        if k == 1:
+            # beta: tick values like 0.000012 would crowd the bar, so
+            # show them as %4.1f and move the power of ten into the label
+            label = _apply_power_of_ten(cb, lo, hi, 'Beta', 'm⁻¹ sr⁻¹')
+        cb.set_label(label)
         # ticks and label above the bar, away from the panel
         cax.xaxis.set_ticks_position('top')
         cax.xaxis.set_label_position('top')

@@ -20,6 +20,16 @@ as dots or, optionally, filled by inverse-distance-weighted interpolation.
 Any other kind found on disk is still listed (so you can see what's in
 your data tree) but reported as not yet implemented.
 
+.. figure:: images/haloviewer_rhi.png
+   :width: 80%
+   :align: center
+   :alt: The HaloViewer window showing a filled RHI scan: radial
+         velocity and beta side by side, with the settings panel on
+         the left.
+
+   The graphic viewer (``haloviewer``) showing one RHI scan with the
+   intensity filter and Fill switched on.
+
 Installation
 ------------
 

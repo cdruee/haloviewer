@@ -62,6 +62,7 @@ import pandas as pd
 from matplotlib.backends.backend_tkagg import (FigureCanvasTkAgg,
                                                 NavigationToolbar2Tk)
 
+from . import __version__
 from . import data as _data
 from . import plotting
 from .scan import (PPI_MODE, PROFILE_MODE, RHI_MODE, SINGLE_SCAN_MODES,
@@ -357,6 +358,14 @@ class _RangeControl:
         self.on_manual_change()
 
 
+def window_title() -> str:
+    """Main window title: product name plus the installed version, e.g.
+    ``"HaloViewer 0.2.1"`` (the version comes from setuptools-scm, see
+    :data:`haloviewer.__version__`)."""
+    from ._metadata import __product__
+    return f'{__product__} {__version__}'
+
+
 class HaloViewerApp:
     """Top-level application: owns the Tk widgets and the currently
     scanned/selected state, and delegates all data loading to
@@ -365,7 +374,7 @@ class HaloViewerApp:
 
     def __init__(self, root: tk.Tk, initial_dir: Optional[str] = None):
         self.root = root
-        root.title('HaloViewer')
+        root.title(window_title())
         root.geometry('1280x800')
 
         self.scan_result: Optional[ScanResult] = None
