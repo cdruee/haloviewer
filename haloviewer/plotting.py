@@ -445,8 +445,8 @@ def create_scan_pair_figure(
         fig: Optional[Figure] = None) -> Tuple[Figure, tuple]:
     """
     Create a figure with two side-by-side panels (1 row, 2 columns)
-    sharing both the x and the y axis, each with its own colorbar on
-    its right-hand side. This is the layout of the single-scan RHI and
+    sharing both the x and the y axis, each with its own horizontal
+    colorbar directly above it. This is the layout of the single-scan RHI and
     PPI views (:func:`plot_rhi`, :func:`plot_ppi`): radial velocity on
     the left, beta on the right.
 
@@ -463,14 +463,17 @@ def create_scan_pair_figure(
     """
     if fig is None:
         fig = Figure(figsize=figsize)
-    gs = fig.add_gridspec(1, 2, wspace=0.32,
-                           left=0.08, right=0.89, top=0.88, bottom=0.12)
+    # colorbars sit horizontally *above* their panel (not beside it), so
+    # the full width goes to the panels: a wider, less stretched RHI
+    # and a larger square PPI
+    gs = fig.add_gridspec(1, 2, wspace=0.10,
+                           left=0.07, right=0.98, top=0.80, bottom=0.10)
     ax_vel = fig.add_subplot(gs[0, 0])
     ax_beta = fig.add_subplot(gs[0, 1], sharex=ax_vel, sharey=ax_vel)
     cax_vel = make_axes_locatable(ax_vel).append_axes(
-        'right', size='4%', pad=0.08)
+        'top', size='4%', pad=0.08)
     cax_beta = make_axes_locatable(ax_beta).append_axes(
-        'right', size='4%', pad=0.08)
+        'top', size='4%', pad=0.08)
     return fig, (ax_vel, ax_beta, cax_vel, cax_beta)
 
 
@@ -747,7 +750,10 @@ def _plot_scan_pair(ax_vel, ax_beta, cax_vel, cax_beta,
         else:
             artist = ax.scatter(h, v, c=values, cmap=cmap, vmin=lo,
                                 vmax=hi, s=marker_size, linewidths=0)
-        fig.colorbar(artist, cax=cax, label=label)
+        fig.colorbar(artist, cax=cax, orientation='horizontal', label=label)
+        # ticks and label above the bar, away from the panel
+        cax.xaxis.set_ticks_position('top')
+        cax.xaxis.set_label_position('top')
         ax.set_xlabel(xlabel)
         ax.grid(True, alpha=0.3)
     ax_vel.set_ylabel(ylabel)
