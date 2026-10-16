@@ -136,9 +136,15 @@ modification times) for both sides. Unchanged folders are not listed
 again. After every scan, the cache and the last source and destination
 paths are saved to a JSON file:
 
-* Windows: ``%APPDATA%\LidarSyncGUI\state.json`` (the user's roaming
+* Windows: ``%APPDATA%\halosync\state.json`` (the user's roaming
   profile),
-* elsewhere: ``~/LidarSyncGUI/state.json``.
+* elsewhere: ``~/.config/halosync/state.json`` (or
+  ``$XDG_CONFIG_HOME/halosync/state.json``).
+
+The environment variable ``HALOSYNC_CONFIG`` names a different folder.
+Earlier versions kept the file in a folder called ``LidarSyncGUI``
+(``%APPDATA%\LidarSyncGUI`` or ``~/LidarSyncGUI``); it is moved to the new
+place automatically on the first start.
 
 On the next start the paths are restored and the first scan starts with
 this "warm" cache. If the file is missing, unreadable or from an

@@ -117,6 +117,7 @@ on its own:
 | module | responsibility |
 |---|---|
 | `haloviewer.hpl` | `.hpl` file format parser (adapted from [cdruee/python-readmet](https://github.com/cdruee/python-readmet)'s `hpl` module) |
+| `haloviewer.settings` | remembered settings (`settings.json`) and the shared cache/`--info` command-line options |
 | `haloviewer.cache` | on-disk cache of parsed scan files, so each file is parsed only once (see below) |
 | `haloviewer.scan` | finds `.hpl` files under a root directory, classifies them by kind from the filename, indexes by timestamp |
 | `haloviewer.data` | turns parsed files into plain numpy/pandas arrays ready to plot |
@@ -133,21 +134,35 @@ matplotlib drawing primitives directly -- it only calls functions in
 `plotting.py`. This means the exact same plotting code is used by the
 GUI, the CLI, and any script that imports `haloviewer.api`.
 
-### Scan cache
+### Scan cache and remembered settings
 
 Parsing a large `.hpl` file takes a noticeable fraction of a second, so
 HaloViewer keeps every regular scan file it has read as a compact numpy
-`.npz` file in a per-user cache directory, and reads it from there next
-time (dozens of times faster). On start-up the viewer brings the cache up to
+`.npz` file in a cache directory, and reads it from there next time
+(dozens of times faster). On start-up the viewer brings the cache up to
 date in the background, newest files first, and removes entries whose
 source file was changed or deleted. Nothing beyond numpy is needed.
 
-* Location: `~/.cache/haloviewer` (Linux), `%LOCALAPPDATA%\haloviewer\Cache`
-  (Windows), `~/Library/Caches/haloviewer` (macOS); about half the size
-  of the `.hpl` files.
-* The environment variable `HALOVIEWER_CACHE` sets another directory,
-  or switches the cache off (`HALOVIEWER_CACHE=off`).
-* The cache can be deleted at any time; it is rebuilt as needed.
+Where the cache lives is chosen with an option of `haloviewer` or
+`haloplot` (or the viewer's **Cache settings…** dialogue) and
+remembered for later runs:
+
+| option | cache location |
+|---|---|
+| `--tmp-cache` (default) | system temp directory, e.g. `/tmp/haloviewer-cache-<user>` or `%TEMP%\haloviewer-cache-<user>`; cleaned up by the system |
+| `--user-cache` | `~/.cache/haloviewer` (Linux), `%LOCALAPPDATA%\haloviewer\Cache` (Windows), `~/Library/Caches/haloviewer` (macOS); persistent |
+| `--cache-dir DIR` | `DIR`; persistent |
+| `--no-cache` | no cache; deletes the existing one |
+
+The cache takes about half the space of the `.hpl` files and can be
+deleted at any time. The environment variable `HALOVIEWER_CACHE` (a
+directory, or `off`) overrides the setting.
+
+The viewer also remembers its data directory and GUI settings (file
+kind, plot type, time preset, filter, fill, window size) in
+`%APPDATA%\haloviewer\settings.json` (Windows) or
+`~/.config/haloviewer/settings.json` (elsewhere). `haloviewer -i` or
+`haloplot -i` shows what is remembered and how big the cache is.
 
 ### Extending to more scan kinds
 

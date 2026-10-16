@@ -12,10 +12,31 @@ Starting the viewer
 
 .. code:: bash
 
-   haloviewer                     # then pick a directory from the GUI
-   haloviewer /path/to/Data/Proc   # or start with a directory already loaded
+   haloviewer                     # the directory used last time (or pick one)
+   haloviewer /path/to/Data/Proc   # start with this directory
+   haloviewer --info              # show the remembered settings, cache size
 
-The optional argument is the root directory to load on start-up.
+The optional argument is the root directory to load on start-up;
+without it, the viewer opens the directory it showed last time. The
+cache options ``--no-cache``, ``--tmp-cache``, ``--user-cache`` and
+``--cache-dir DIR`` choose where the scan cache lives (see
+:ref:`scan-cache`); ``-i``/``--info`` prints the remembered settings and
+the cache location and size, and exits.
+
+Remembered settings
+~~~~~~~~~~~~~~~~~~~
+
+On closing, the viewer remembers its root directory, file kind, plot
+type, time preset, filter (on/off and value), Fill, and window size, and
+restores them on the next start. They are kept, together with the cache
+setting, in a small JSON file:
+
+* Windows: ``%APPDATA%\haloviewer\settings.json`` (the roaming profile)
+* elsewhere: ``~/.config/haloviewer/settings.json`` (or
+  ``$XDG_CONFIG_HOME/haloviewer/settings.json``)
+
+The environment variable ``HALOVIEWER_CONFIG`` names a different
+directory. Deleting the file just resets everything to the defaults.
 
 Window layout
 -------------
@@ -344,18 +365,49 @@ files… 120/700", then "Cache: 700 file(s) ready (850 MB)"). The viewer
 stays usable meanwhile; a file that isn't cached yet is simply read
 from the ``.hpl`` file (and cached) when it is plotted.
 
-The cache lives in the per-user cache directory:
+Where the cache lives
+~~~~~~~~~~~~~~~~~~~~~
 
-* Linux: ``~/.cache/haloviewer`` (or ``$XDG_CACHE_HOME/haloviewer``)
-* Windows: ``%LOCALAPPDATA%\haloviewer\Cache``
-* macOS: ``~/Library/Caches/haloviewer``
+There are four choices. Pick one with a command-line option of
+``haloviewer`` or ``haloplot``, or in the **Cache settings…** dialogue
+(button next to "Root directory"). The choice is remembered (see
+`Remembered settings`_) and shared by both programs.
 
-The environment variable ``HALOVIEWER_CACHE`` sets a different
-directory, or switches caching off altogether (``HALOVIEWER_CACHE=off``).
-The cache takes about half the space of the ``.hpl`` files it holds. It
-can be deleted at any time; it is rebuilt as needed. Entries of a
-directory that isn't available (e.g. an unmounted network drive) are
-kept. ``haloplot`` and the Python API use the same cache.
+.. list-table::
+   :header-rows: 1
+   :widths: 22 78
+
+   * - option
+     - cache location
+   * - ``--tmp-cache``
+       (default)
+     - The system temp directory: ``/tmp/haloviewer-cache-<user>``
+       (readable by you only) or ``%TEMP%\haloviewer-cache-<user>``.
+       The system cleans it up -- on reboot or once the files are old
+       enough, depending on its configuration -- so it never hogs disk
+       space, but may have to be rebuilt now and then.
+   * - ``--user-cache``
+     - The per-user cache directory: ``~/.cache/haloviewer`` on Linux,
+       ``%LOCALAPPDATA%\haloviewer\Cache`` on Windows,
+       ``~/Library/Caches/haloviewer`` on macOS. Persistent, but it
+       grows with the amount of data viewed (about half the size of the
+       ``.hpl`` files).
+   * - ``--cache-dir DIR``
+     - Like ``--user-cache``, in ``DIR``.
+   * - ``--no-cache``
+     - No cache at all; every file is parsed each time. Choosing it
+       deletes the existing cache(s) -- in the temp and per-user
+       directories and the last custom directory (only cache files are
+       removed there).
+
+The dialogue also shows the current cache folder and its size, and
+**Empty cache** deletes its contents (they are created again as
+needed). ``haloviewer -i`` / ``haloplot -i`` show the same on the
+command line.
+
+The environment variable ``HALOVIEWER_CACHE`` overrides the setting: a
+directory to use, or ``off`` for no cache. Entries whose source
+directory isn't available (e.g. an unmounted network drive) are kept.
 
 Troubleshooting
 ---------------

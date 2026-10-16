@@ -144,6 +144,10 @@ on its own:
    * - :mod:`haloviewer.hpl`
      - ``.hpl`` file format parser (adapted from the ``hpl`` module of
        `cdruee/python-readmet <https://github.com/cdruee/python-readmet>`_)
+   * - :mod:`haloviewer.settings`
+     - remembered settings (``settings.json``) and the cache and
+       ``--info`` command-line options shared by ``haloviewer`` and
+       ``haloplot``
    * - :mod:`haloviewer.cache`
      - on-disk cache of parsed scan files, so each file is parsed only
        once (see :ref:`scan-cache`)

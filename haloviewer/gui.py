@@ -50,6 +50,8 @@ inverse-distance-weighted interpolation instead of drawing individual dots.
 
 from __future__ import annotations
 
+import argparse
+import os
 import sys
 import threading
 import tkinter as tk
@@ -66,8 +68,10 @@ from matplotlib.backends.backend_tkagg import (FigureCanvasTkAgg,
 from . import __version__
 from . import cache as _cache
 from . import data as _data
+from . import settings as _settings
 from . import plotting
 from .scan import (PPI_MODE, PROFILE_MODE, RHI_MODE, SINGLE_SCAN_MODES,
+                   TIMESERIES_MODE,
                     TIMESERIES_MODE, FileEntry, ScanResult,
                     get_kind_info, scan_directory)
 
@@ -376,7 +380,14 @@ class HaloViewerApp:
     :mod:`haloviewer.data`/:mod:`haloviewer.scan` and all
     drawing to :mod:`haloviewer.plotting`."""
 
-    def __init__(self, root: tk.Tk, initial_dir: Optional[str] = None):
+    def __init__(self, root: tk.Tk, initial_dir: Optional[str] = None,
+                 restore: bool = True):
+        """
+        :param initial_dir: data directory to open; defaults to the \
+            remembered one.
+        :param restore: restore the remembered GUI settings (see \
+            :mod:`haloviewer.settings`), and save them on closing.
+        """
         self.root = root
         root.title(window_title())
         root.geometry('1280x800')
@@ -416,6 +427,15 @@ class HaloViewerApp:
         self._build_widgets()
         self._update_range_controls_enabled(None)
 
+        self._restore = restore
+        self._saved_kind: Optional[str] = None
+        if restore:
+            saved = self._restore_settings()
+            if not initial_dir and saved['root_dir'] and \
+                    Path(saved['root_dir']).is_dir():
+                initial_dir = saved['root_dir']
+        root.protocol('WM_DELETE_WINDOW', self._on_close)
+
         if initial_dir:
             self.dir_var.set(str(initial_dir))
             self._rescan()
@@ -445,8 +465,14 @@ class HaloViewerApp:
         row = 0
 
         # -- root directory -------------------------------------------------
-        ttk.Label(parent, text='Root directory').grid(
-            row=row, column=0, sticky='w')
+        head = ttk.Frame(parent)
+        head.grid(row=row, column=0, sticky='we')
+        head.columnconfigure(0, weight=1)
+        ttk.Label(head, text='Root directory').grid(row=0, column=0,
+                                                    sticky='w')
+        ttk.Button(head, text='Cache settings…',
+                   command=self._open_cache_dialog).grid(
+            row=0, column=1, sticky='e', pady=(0, 2))
         row += 1
         dir_frame = ttk.Frame(parent)
         dir_frame.grid(row=row, column=0, sticky='we', pady=(0, 8))
@@ -722,9 +748,15 @@ class HaloViewerApp:
         self.kind_combo.configure(values=labels)
         self._kind_names = kinds
 
+        if self._restore:
+            _settings.save(root_dir=str(path))
         if kinds:
-            self.kind_combo.current(0)
-            self._select_kind(kinds[0])
+            first = 0
+            if self._saved_kind in kinds:
+                first = kinds.index(self._saved_kind)
+            self._saved_kind = None
+            self.kind_combo.current(first)
+            self._select_kind(kinds[first])
             self.status_var.set(
                 f'Found {len(kinds)} file kind(s) under {path}.')
             self._start_cache_build()
@@ -735,6 +767,63 @@ class HaloViewerApp:
             self._update_range_controls_enabled(None)
             self._show_message(f'No .hpl files found under\n{path}')
             self.status_var.set(f'No .hpl files found under {path}.')
+
+    # ------------------------------------------------------------------
+    # remembered settings
+    # ------------------------------------------------------------------
+
+    def _restore_settings(self) -> dict:
+        """Put the remembered GUI settings into the widgets (the file
+        kind is applied by the first :meth:`_rescan`)."""
+        s = _settings.load()
+        if s['mode'] in (PROFILE_MODE, TIMESERIES_MODE, RHI_MODE, PPI_MODE):
+            self.mode_var.set(s['mode'])
+        if s['time_preset'] in _TIME_PRESET_DELTAS:
+            self.time_preset_var.set(s['time_preset'])
+            self._apply_time_preset()
+        self.filter_var.set(bool(s['filter_on']))
+        if s['filter_value']:
+            self.filter_value_var.set(s['filter_value'])
+        self.fill_var.set(bool(s['fill']))
+        if s['geometry']:
+            try:
+                self.root.geometry(s['geometry'])
+            except tk.TclError:
+                pass
+        self._saved_kind = s['kind'] or None
+        return s
+
+    def _save_settings(self) -> None:
+        if not self._restore:
+            return
+        _settings.save(
+            root_dir=self.dir_var.get().strip(),
+            kind=self.current_kind or '',
+            mode=self.mode_var.get(),
+            time_preset=self.time_preset_var.get(),
+            filter_on=bool(self.filter_var.get()),
+            filter_value=self.filter_value_var.get().strip(),
+            fill=bool(self.fill_var.get()),
+            geometry=self.root.geometry())
+
+    def _on_close(self) -> None:
+        self._save_settings()
+        if self._cache_stop is not None:
+            self._cache_stop.set()
+        self.root.destroy()
+
+    def _open_cache_dialog(self) -> None:
+        _CacheDialog(self)
+
+    def _on_cache_setting_changed(self) -> None:
+        """Called by the cache dialogue after a change of setting."""
+        if self._cache_stop is not None:
+            self._cache_stop.set()
+            self._cache_stop = None
+        if _cache.get_default_cache() is None:
+            self.cache_var.set('Cache: off')
+        else:
+            self._start_cache_build()
 
     # ------------------------------------------------------------------
     # scan cache
@@ -1601,11 +1690,174 @@ class HaloViewerApp:
         self._render_current()
 
 
+class _CacheDialog:
+    """The "Cache settings" dialogue: choose where the scan cache lives
+    (or switch it off), see how big it is, and empty it."""
+
+    _CHOICES = [
+        ('off', 'No cache (deletes the existing cache)'),
+        ('tmp', 'Temporary: system temp folder, cleaned up by the '
+                'system (default)'),
+        ('user', 'Per-user: persistent, may use a lot of disk space'),
+        ('custom', 'Custom folder (persistent):'),
+    ]
+
+    def __init__(self, app: 'HaloViewerApp'):
+        self.app = app
+        self.win = win = tk.Toplevel(app.root)
+        win.title('Cache settings')
+        win.transient(app.root)
+        win.resizable(False, False)
+        frame = ttk.Frame(win, padding=10)
+        frame.grid(row=0, column=0, sticky='nsew')
+        frame.columnconfigure(0, weight=1)
+
+        s = _settings.load()
+        self.mode_var = tk.StringVar(value=s['cache_mode'])
+        self.dir_var = tk.StringVar(value=s['cache_dir'])
+        env = os.environ.get(_cache.ENV_VAR)
+        state = 'disabled' if env is not None else 'normal'
+
+        where = ttk.LabelFrame(frame, text='Where to keep the scan cache',
+                               padding=6)
+        where.grid(row=0, column=0, sticky='we')
+        where.columnconfigure(0, weight=1)
+        self.radios = {}
+        for i, (mode, text) in enumerate(self._CHOICES):
+            rb = ttk.Radiobutton(where, text=text, value=mode,
+                                 variable=self.mode_var, state=state,
+                                 command=self._update_dir_state)
+            rb.grid(row=i, column=0, sticky='w')
+            self.radios[mode] = rb
+        dir_frame = ttk.Frame(where)
+        dir_frame.grid(row=len(self._CHOICES), column=0, sticky='we',
+                       padx=(20, 0))
+        dir_frame.columnconfigure(0, weight=1)
+        self.dir_entry = ttk.Entry(dir_frame, textvariable=self.dir_var,
+                                   width=40)
+        self.dir_entry.grid(row=0, column=0, sticky='we')
+        self.dir_button = ttk.Button(dir_frame, text='Browse…',
+                                     command=self._browse)
+        self.dir_button.grid(row=0, column=1, padx=(4, 0))
+        if env is not None:
+            ttk.Label(where, foreground='#a05000', wraplength=420,
+                      text=f'The environment variable {_cache.ENV_VAR} '
+                           f'is set ({env!r}) and overrides this '
+                           f'setting.').grid(
+                row=len(self._CHOICES) + 1, column=0, sticky='w',
+                pady=(4, 0))
+
+        info = ttk.LabelFrame(frame, text='Current state', padding=6)
+        info.grid(row=1, column=0, sticky='we', pady=(8, 0))
+        self.info_var = tk.StringVar()
+        ttk.Label(info, textvariable=self.info_var, justify='left',
+                  wraplength=460).grid(row=0, column=0, sticky='w')
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=2, column=0, sticky='e', pady=(10, 0))
+        self.clear_button = ttk.Button(buttons, text='Empty cache',
+                                       command=self._empty)
+        self.clear_button.grid(row=0, column=0, padx=(0, 16))
+        ttk.Button(buttons, text='Apply', state=state,
+                   command=self._apply).grid(row=0, column=1, padx=(0, 4))
+        ttk.Button(buttons, text='Close',
+                   command=win.destroy).grid(row=0, column=2)
+
+        self._update_dir_state()
+        self._refresh_info()
+        win.bind('<Escape>', lambda e: win.destroy())
+
+    def _update_dir_state(self) -> None:
+        on = (self.mode_var.get() == 'custom'
+              and os.environ.get(_cache.ENV_VAR) is None)
+        self.dir_entry.configure(state='normal' if on else 'disabled')
+        self.dir_button.configure(state='normal' if on else 'disabled')
+
+    def _browse(self) -> None:
+        chosen = filedialog.askdirectory(
+            parent=self.win, initialdir=self.dir_var.get() or None,
+            title='Folder for the scan cache')
+        if chosen:
+            self.dir_var.set(chosen)
+
+    def _refresh_info(self) -> None:
+        mode, directory = _cache.effective_setting()
+        lines = [f'Settings file: {_settings.settings_path()}',
+                 f'Cache: {_cache.MODE_LABELS[mode]}']
+        if directory is not None:
+            n, size = _cache.ScanCache(directory).stats()
+            lines.append(f'Folder: {directory}')
+            lines.append(f'Contents: {n} file(s), {size / 1e6:.1f} MB')
+        self.info_var.set('\n'.join(lines))
+        self.clear_button.configure(
+            state='normal' if directory is not None else 'disabled')
+
+    def _apply(self) -> None:
+        mode = self.mode_var.get()
+        directory = self.dir_var.get().strip() or None
+        if mode == 'custom' and not directory:
+            messagebox.showerror('Cache settings',
+                                 'Please choose a folder for the cache.',
+                                 parent=self.win)
+            return
+        if mode == 'off' and not messagebox.askyesno(
+                'Cache settings', 'Switch the scan cache off and delete '
+                'all cached files?', parent=self.win):
+            return
+        if self.app._cache_stop is not None:
+            self.app._cache_stop.set()
+        try:
+            _cache.configure(mode, directory)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror('Cache settings', str(exc),
+                                 parent=self.win)
+            return
+        self._refresh_info()
+        self.app._on_cache_setting_changed()
+
+    def _empty(self) -> None:
+        directory = _cache.default_cache_dir()
+        if directory is None:
+            return
+        if not messagebox.askyesno(
+                'Cache settings', f'Delete all cached files in\n'
+                f'{directory}?\n\nThey are created again as needed.',
+                parent=self.win):
+            return
+        if self.app._cache_stop is not None:
+            self.app._cache_stop.set()
+            self.app._cache_stop = None
+        _cache.ScanCache(directory).clear()
+        self.app.cache_var.set('Cache: emptied')
+        self._refresh_info()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog='haloviewer',
+        description='Graphic viewer for Halo Photonics wind lidar data.')
+    parser.add_argument(
+        'directory', nargs='?', metavar='DIR',
+        help='data (Proc) directory to open; defaults to the one used '
+             'last time')
+    _settings.add_cache_arguments(parser)
+    return parser
+
+
 def main(argv=None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    initial_dir = argv[0] if argv else None
+    parser = build_parser()
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        message = _settings.apply_cache_arguments(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if message:
+        print(message, file=sys.stderr)
+    if args.info:
+        print(_settings.info_text())
+        return 0
     root = tk.Tk()
-    HaloViewerApp(root, initial_dir=initial_dir)
+    HaloViewerApp(root, initial_dir=args.directory)
     root.mainloop()
     return 0
 

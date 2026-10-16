@@ -126,6 +126,11 @@ arrays for your own analysis.
 
 .. automodule:: haloviewer.hpl
 
+``haloviewer.settings`` -- remembered settings
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: haloviewer.settings
+
 ``haloviewer.cache`` -- scan cache
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

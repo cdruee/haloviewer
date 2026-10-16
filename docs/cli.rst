@@ -170,6 +170,22 @@ base font size scales with the figure area. It is 16 pt at A4 landscape
 (:data:`haloviewer.api.BASE_FONTSIZE_AT_A4`) and proportionally smaller
 or larger for other sizes, so text keeps the same relative size.
 
+Scan cache and ``--info``
+-------------------------
+
+``haloplot`` reads raw scan files through the same scan cache as the
+viewer (see :ref:`scan-cache`). ``--tmp-cache`` (the default),
+``--user-cache``, ``--cache-dir DIR`` and ``--no-cache`` choose where it
+lives; the choice is remembered for later runs of both ``haloplot`` and
+``haloviewer``, and ``--no-cache`` also deletes the existing cache.
+``-i``/``--info`` prints the remembered settings and the cache location
+and size. Both work without ``FILE``:
+
+.. code:: bash
+
+   haloplot --user-cache     # from now on, keep the cache in ~/.cache
+   haloplot -i               # what is remembered, how big is the cache?
+
 Messages and exit status
 ------------------------
 

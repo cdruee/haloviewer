@@ -36,6 +36,10 @@ Examples::
 
     # neither -p/--plot nor --show given -> saved as "plot.png"
     haloplot some_file.hpl
+
+    # remembered settings and cache size; keep the cache in ~/.cache
+    haloplot --info
+    haloplot --user-cache
 """
 
 from __future__ import annotations
@@ -47,6 +51,7 @@ from typing import List, Optional
 
 from . import api
 from . import data as _data
+from . import settings as _settings
 
 #: Output filename used when neither -p/--plot nor --show is given.
 DEFAULT_OUTPUT = 'plot.png'
@@ -67,9 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
         prog='haloplot',
         description='Plot Halo Photonics wind lidar .hpl file(s).')
     parser.add_argument(
-        'files', nargs='+', metavar='FILE',
+        'files', nargs='*', metavar='FILE',
         help='file(s), directory/directories (searched recursively for '
-             '.hpl files), and/or glob pattern(s) to plot')
+             '.hpl files), and/or glob pattern(s) to plot. May be '
+             'omitted with -i/--info or a cache option')
     parser.add_argument(
         '-k', '--kind', metavar='KIND',
         help='file kind to select (e.g. Processed_Wind_Profile, VAD, '
@@ -135,6 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
         help='figure size in inches (default: A4 landscape, 11.69x8.27)')
     parser.add_argument(
         '--verbose', '-v', action='store_true', help='enable debug logging')
+    _settings.add_cache_arguments(parser)
     return parser
 
 
@@ -145,6 +152,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)
+
+    try:
+        message = _settings.apply_cache_arguments(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if message:
+        print(message, file=sys.stderr)
+    if args.info:
+        print(_settings.info_text())
+    if not args.files:
+        if message or args.info:
+            return 0
+        parser.error('the following arguments are required: FILE')
 
     output = args.output
     if output is None and not args.show:

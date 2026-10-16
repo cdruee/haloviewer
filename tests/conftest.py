@@ -29,10 +29,15 @@ def proc_tree(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _private_scan_cache(tmp_path_factory, monkeypatch):
-    """Give every test its own, empty scan cache (never the user's)."""
+    """Give every test its own, empty scan cache and settings/state
+    directories (never the user's)."""
     from haloviewer import cache
     monkeypatch.setenv(cache.ENV_VAR,
                        str(tmp_path_factory.mktemp("scan-cache")))
+    monkeypatch.setenv("HALOVIEWER_CONFIG",
+                       str(tmp_path_factory.mktemp("config")))
+    monkeypatch.setenv("HALOSYNC_CONFIG",
+                       str(tmp_path_factory.mktemp("halosync-config")))
     cache.set_default_cache()
     yield
     cache.set_default_cache()

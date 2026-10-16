@@ -72,8 +72,9 @@ Important assumptions (please check these match your setup):
 8. Persistence: the most recently selected source/destination paths as
    well as the entire directory scan cache (size/timestamp per file) are
    automatically written to a JSON file in the signed-in Windows user's
-   roaming profile after every scan (%APPDATA%\\LidarSyncGUI\\state.json,
-   see get_config_path()) and reloaded on the next program start. The
+   roaming profile after every scan (%APPDATA%\\halosync\\state.json,
+   ~/.config/halosync/state.json outside Windows, see get_config_path())
+   and reloaded on the next program start. The
    scan then starts immediately with a "warm" cache -- unchanged folders
    do not need to be listed over the network again, even after a program
    restart. The "full scan" tick-box next to the refresh button discards
@@ -423,14 +424,40 @@ STATE_FILENAME = "state.json"
 
 
 def get_config_dir() -> Path:
-    """Roaming profile folder of the signed-in user (per-user, as is usual
-    on Windows); falls back to the home directory outside Windows."""
-    base = os.environ.get("APPDATA")
-    if not base:
-        base = str(Path.home())
-    d = Path(base) / "LidarSyncGUI"
+    """Per-user configuration folder: %APPDATA%\\halosync (the roaming
+    profile of the signed-in user) on Windows, $XDG_CONFIG_HOME/halosync
+    (normally ~/.config/halosync) elsewhere; HALOSYNC_CONFIG names a
+    different folder. A state file left by earlier versions in their
+    "LidarSyncGUI" folder is moved here, so saved paths and the scan
+    cache survive the rename."""
+    env = os.environ.get("HALOSYNC_CONFIG")
+    appdata = os.environ.get("APPDATA")
+    if env:
+        d, old = Path(env).expanduser(), None
+    elif appdata:
+        d, old = Path(appdata) / "halosync", Path(appdata) / "LidarSyncGUI"
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+        d, old = Path(base) / "halosync", Path.home() / "LidarSyncGUI"
     d.mkdir(parents=True, exist_ok=True)
+    if old is not None:
+        _migrate_state(old, d)
     return d
+
+
+def _migrate_state(old_dir: Path, new_dir: Path) -> None:
+    """Move state.json from the folder of earlier versions to new_dir
+    (unless new_dir already has one), then remove the old folder if it
+    is empty. Never raises."""
+    old_file = old_dir / STATE_FILENAME
+    new_file = new_dir / STATE_FILENAME
+    try:
+        if old_file.is_file() and not new_file.exists():
+            shutil.move(str(old_file), str(new_file))
+        if old_dir.is_dir() and not any(old_dir.iterdir()):
+            old_dir.rmdir()
+    except OSError:
+        pass
 
 
 def get_config_path() -> Path:
