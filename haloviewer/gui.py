@@ -168,6 +168,8 @@ _TIME_PRESETS = [
 # panel.
 _PRESET_COLUMNS = 3
 _TIME_PRESET_DELTAS = {key: delta for key, _label, delta in _TIME_PRESETS}
+# Preset selected at start-up: the last 24 h of the data.
+_DEFAULT_TIME_PRESET = '24h'
 
 
 def _sample(entries: List[FileEntry], n: int) -> List[FileEntry]:
@@ -557,7 +559,9 @@ class HaloViewerApp:
         # quick range presets -- wrapped at _PRESET_COLUMNS per row so
         # they fit the narrow left panel in two short rows instead of
         # one very wide one.
-        self.time_preset_var = tk.StringVar(value='custom')
+        # default: the last 24 h of the selected kind's data ("Custom"
+        # shows the full range)
+        self.time_preset_var = tk.StringVar(value=_DEFAULT_TIME_PRESET)
         preset_frame = ttk.Frame(time_frame)
         preset_frame.grid(row=trow, column=0, sticky='we', padx=2, pady=(4, 4))
         for c in range(_PRESET_COLUMNS):
@@ -579,6 +583,8 @@ class HaloViewerApp:
         end_entry.grid(row=trow, column=0, sticky='we', padx=4, pady=(0, 4))
         end_entry.bind('<Return>', lambda e: self._on_end_time_change())
         trow += 1
+        # lock Start time to match the default preset from the outset
+        self._apply_time_preset()
 
         ttk.Button(parent, text='Apply range',
                    command=self._apply_range).grid(

@@ -251,6 +251,12 @@ Start time is editable only when Custom is selected. Changing End time
 while a preset other than Custom is active recomputes Start time from
 it.
 
+On start-up, and whenever a file kind is selected, End time is set to
+the end of that kind's data. The default preset is **24h**, so the
+viewer opens on the last 24 hours of data. Select Custom to see the
+whole data range (Start time is then reset to the start of the data
+when you pick a file kind).
+
 Browsing files and time windows
 -------------------------------
 
