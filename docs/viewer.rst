@@ -321,6 +321,42 @@ Wind-speed autoscaling is capped at 50 m/s, so a few noisy gates don't
 squash the rest of the profile. Intensity and beta scale to the
 2nd-98th percentile of the data shown.
 
+.. _scan-cache:
+
+Scan cache
+----------
+
+Reading a raw scan file (``.hpl`` text) is slow compared with drawing
+it: a large Stare file takes about a quarter of a second to parse, so a
+History over a few days of data took a long time to appear. HaloViewer
+therefore keeps every regular scan file it has read (VAD, Stare, RHI,
+Wind_Profile, ...) as a numpy ``.npz`` file in a cache directory and
+reads it from there next time -- dozens of times faster. The cache holds
+the unfiltered data, so the intensity filter, Fill and all plot types
+work on it unchanged; ``Processed_Wind_Profile`` files are small and are
+always read directly.
+
+After a root directory has been scanned, the viewer brings the cache up
+to date in the background, newest files first (the default view is the
+last 24 h), and then removes entries whose source file was changed or
+deleted. Its progress is shown below the status line ("Cache: preparing
+files… 120/700", then "Cache: 700 file(s) ready (850 MB)"). The viewer
+stays usable meanwhile; a file that isn't cached yet is simply read
+from the ``.hpl`` file (and cached) when it is plotted.
+
+The cache lives in the per-user cache directory:
+
+* Linux: ``~/.cache/haloviewer`` (or ``$XDG_CACHE_HOME/haloviewer``)
+* Windows: ``%LOCALAPPDATA%\haloviewer\Cache``
+* macOS: ``~/Library/Caches/haloviewer``
+
+The environment variable ``HALOVIEWER_CACHE`` sets a different
+directory, or switches caching off altogether (``HALOVIEWER_CACHE=off``).
+The cache takes about half the space of the ``.hpl`` files it holds. It
+can be deleted at any time; it is rebuilt as needed. Entries of a
+directory that isn't available (e.g. an unmounted network drive) are
+kept. ``haloplot`` and the Python API use the same cache.
+
 Troubleshooting
 ---------------
 

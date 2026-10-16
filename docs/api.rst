@@ -126,6 +126,11 @@ arrays for your own analysis.
 
 .. automodule:: haloviewer.hpl
 
+``haloviewer.cache`` -- scan cache
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: haloviewer.cache
+
 ``haloviewer.scan`` -- finding and classifying files
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

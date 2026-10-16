@@ -19,6 +19,7 @@ from typing import Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from . import cache as _cache
 from . import hpl
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,16 @@ def _mask_below(values: np.ndarray, intensity: np.ndarray,
     return out
 
 
+def _f32_threshold(intensity_min: Optional[float]) -> Optional[float]:
+    """The filter threshold for intensities held as ``float32`` (see
+    :class:`haloviewer.hpl.ScanArrays`), rounded the same way, so that
+    a value exactly equal to the threshold in the file (e.g. ``1.050000``
+    with a threshold of 1.05) still counts as "not below" it."""
+    if intensity_min is None:
+        return None
+    return float(np.float32(intensity_min))
+
+
 @dataclass
 class ProfileData:
     """One "Processed Wind Profile" snapshot: height, speed and
@@ -167,28 +178,19 @@ def load_wind_profile_intensity(path, n_levels: int) -> np.ndarray:
     :returns: array of length ``n_levels``.
     :raises ValueError: if the file contains no usable ray data.
     """
-    f = hpl.DataFile(str(path))
-    if not f.rays:
+    a = _cache.read_scan_arrays(path)
+    if a.n_rays == 0 or a.n_gates == 0:
         raise ValueError(f'{path} contains no scan (ray) data')
 
-    per_ray: List[np.ndarray] = []
-    n_gates = 0
-    for r in f.rays:
-        ng = len(r.data.index)
-        if ng == 0:
-            continue
-        inten = pd.to_numeric(r.data['Intensity'], errors='coerce').to_numpy()
-        if 'Range Gate' in r.data.columns:
-            gate = pd.to_numeric(r.data['Range Gate'],
-                                 errors='coerce').to_numpy()
-        else:
-            gate = np.arange(ng, dtype=float)
-        ok = np.isfinite(gate) & (gate >= 0) & (gate < n_levels)
-        row = np.full(n_levels, np.nan)
-        row[gate[ok].astype(int)] = inten[ok]
-        per_ray.append(row)
-        n_gates = max(n_gates, int(np.nanmax(gate)) + 1
-                      if np.isfinite(gate).any() else ng)
+    gate = a.gate.astype(float)
+    inten = a.intensity.astype(float)
+    ok = np.isfinite(gate) & (gate >= 0) & (gate < n_levels)
+    rows = np.full((a.n_rays, n_levels), np.nan)
+    ray_idx = np.nonzero(ok)[0]
+    rows[ray_idx, gate[ok].astype(int)] = inten[ok]
+    per_ray = list(rows)
+    finite = np.isfinite(gate)
+    n_gates = (int(np.nanmax(gate)) + 1 if finite.any() else a.n_gates)
     if not per_ray:
         raise ValueError(f'{path} contains no usable intensity data')
     if n_gates != n_levels:
@@ -456,6 +458,40 @@ def _ray_gate_index(ray) -> np.ndarray:
     return np.arange(n, dtype=float)
 
 
+def _gate_index_array(gate: np.ndarray) -> np.ndarray:
+    """Per-ray gate indices for a ``(n_rays, n_gates)`` ``Range Gate``
+    array: a ray's own values where all of them are usable, else
+    ``0 .. n_gates - 1`` (as :func:`_ray_gate_index` does per ray)."""
+    gate = np.asarray(gate, dtype=float)
+    out = np.broadcast_to(np.arange(gate.shape[1], dtype=float),
+                          gate.shape).copy()
+    good = np.isfinite(gate).all(axis=1)
+    out[good] = gate[good]
+    return out
+
+
+def _tilt_corrected_unit_vectors(azimuth, elevation, pitch, roll
+                                 ) -> Tuple[np.ndarray, np.ndarray,
+                                            np.ndarray]:
+    """Array version of :func:`_tilt_corrected_unit_vector` (one
+    ``(east, north, up)`` triple per ray); ``nan`` angles count as 0,
+    as ``None`` does there."""
+    def rad(v):
+        v = np.asarray(v, dtype=float)
+        return np.deg2rad(np.where(np.isfinite(v), v, 0.0))
+    az, el, p, r = rad(azimuth), rad(elevation), rad(pitch), rad(roll)
+    x0 = np.cos(el) * np.sin(az)
+    y0 = np.cos(el) * np.cos(az)
+    z0 = np.sin(el)
+    x1 = x0
+    y1 = y0 * np.cos(p) - z0 * np.sin(p)
+    z1 = y0 * np.sin(p) + z0 * np.cos(p)
+    x2 = x1 * np.cos(r) + z1 * np.sin(r)
+    y2 = y1
+    z2 = -x1 * np.sin(r) + z1 * np.cos(r)
+    return x2, y2, z2
+
+
 def _tilt_corrected_unit_vector(
         azimuth: float, elevation: float,
         pitch: Optional[float], roll: Optional[float]
@@ -590,7 +626,7 @@ def load_scan_history(paths: Iterable,
     rather than interpolating across the gap.
 
     A file that fails to load (corrupt, truncated beyond what
-    :meth:`hpl.DataFile._get_datablock`'s own truncation handling can
+    :func:`hpl.read_scan_arrays`'s own truncation handling can
     recover, or not actually a regular scan file) is skipped with a
     logged warning rather than aborting the whole history, so one bad
     file among many doesn't blank the whole plot.
@@ -603,55 +639,66 @@ def load_scan_history(paths: Iterable,
     :raises ValueError: if none of the files could be loaded, or none \
         of the ones that did contain any ray data.
     """
-    files = []
+    scans = []
     for p in paths:
         try:
-            files.append(hpl.DataFile(str(p)))
+            scans.append(_cache.read_scan_arrays(p))
         except (IOError, ValueError) as exc:
             logger.warning('skipping %s: %s', p, exc)
-    files = [f for f in files if f.rays]
-    if not files:
+    scans = [a for a in scans if a.n_rays and a.n_gates]
+    if not scans:
         raise ValueError('no scan (ray) data found in the given files')
 
     gate_length, gate_points = 1.0, 1.0
-    for f in files:
-        gl, gp = _header_gate_geometry(f.header)
+    for a in scans:
+        gl, gp = _header_gate_geometry(a.header)
         if gl:
             gate_length, gate_points = gl, gp
             break
-    n_gates = max((len(r.data.index) for f in files for r in f.rays),
-                  default=0)
+    n_gates = max(a.n_gates for a in scans)
     distance = _gate_distance_axis(gate_length, n_gates, gate_points)
 
-    ray_times = pd.DatetimeIndex([r.time for f in files for r in f.rays])
-    t0 = ray_times.min()
-    span = (ray_times.max() - t0).total_seconds()
+    all_times = np.concatenate([a.time for a in scans])
+    all_times = all_times[~np.isnat(all_times)]
+    if not all_times.size:
+        raise ValueError('no scan (ray) data found in the given files')
+    t0 = pd.Timestamp(all_times.min())
+    span = (pd.Timestamp(all_times.max()) - t0).total_seconds()
     bin_s = _pick_history_bin_seconds(span)
     n_bins = max(1, int(span // bin_s) + 1)
 
-    sum_i = np.zeros((n_gates, n_bins))
-    cnt_i = np.zeros((n_gates, n_bins))
-    sum_b = np.zeros((n_gates, n_bins))
-    cnt_b = np.zeros((n_gates, n_bins))
+    # accumulated as (bin, gate) and transposed at the end
+    sum_i = np.zeros((n_bins, n_gates))
+    cnt_i = np.zeros((n_bins, n_gates))
+    sum_b = np.zeros((n_bins, n_gates))
+    cnt_b = np.zeros((n_bins, n_gates))
 
-    for f in files:
-        for r in f.rays:
-            ng = len(r.data.index)
-            if ng == 0:
-                continue
-            j = int((r.time - t0).total_seconds() // bin_s)
-            j = min(max(j, 0), n_bins - 1)
-            inten = pd.to_numeric(r.data['Intensity'], errors='coerce').to_numpy()
-            beta = pd.to_numeric(r.data['Beta'], errors='coerce').to_numpy()
-            if intensity_min is not None:
-                beta = _mask_below(beta, inten, intensity_min)
-                inten = _mask_below(inten, inten, intensity_min)
-            ok_i = np.isfinite(inten)
-            sum_i[:ng, j] += np.where(ok_i, inten, 0.0)
-            cnt_i[:ng, j] += ok_i
-            ok_b = np.isfinite(beta)
-            sum_b[:ng, j] += np.where(ok_b, beta, 0.0)
-            cnt_b[:ng, j] += ok_b
+    t0_ns = t0.to_datetime64().astype('datetime64[ns]')
+    for a in scans:
+        valid = ~np.isnat(a.time)
+        if not valid.any():
+            continue
+        ng = a.n_gates
+        secs = (a.time[valid] - t0_ns).astype('int64') / 1e9
+        j = np.clip((secs // bin_s).astype(int), 0, n_bins - 1)
+        inten = a.intensity[valid].astype(float)
+        beta = a.beta[valid].astype(float)
+        if intensity_min is not None:
+            thr = _f32_threshold(intensity_min)
+            beta = _mask_below(beta, inten, thr)
+            inten = _mask_below(inten, inten, thr)
+        ok_i = np.isfinite(inten)
+        ok_b = np.isfinite(beta)
+        # sum all rays of the same bin at once (much faster than
+        # np.add.at): sort by bin, then reduce each run of equal bins
+        order = np.argsort(j, kind='stable')
+        bins, starts = np.unique(j[order], return_index=True)
+        for acc, vals in ((sum_i, np.where(ok_i, inten, 0.0)),
+                          (cnt_i, ok_i.astype(float)),
+                          (sum_b, np.where(ok_b, beta, 0.0)),
+                          (cnt_b, ok_b.astype(float))):
+            acc[bins, :ng] += np.add.reduceat(vals[order], starts, axis=0)
+    sum_i, cnt_i, sum_b, cnt_b = sum_i.T, cnt_i.T, sum_b.T, cnt_b.T
 
     with np.errstate(invalid='ignore'):
         intensity = np.where(cnt_i > 0, sum_i / np.where(cnt_i > 0, cnt_i, 1),
@@ -724,52 +771,38 @@ def load_scan_points(path, intensity_min: Optional[float] = None
     :raises ValueError: if the file contains no ray (scan) data.
     """
     path = Path(path)
-    f = hpl.DataFile(str(path))
-    rays = [r for r in f.rays if len(r.data.index)] if f.rays else []
-    if not rays:
+    a = _cache.read_scan_arrays(path)
+    if a.n_rays == 0 or a.n_gates == 0:
         raise ValueError(f'{path} contains no scan (ray) data')
-    gate_length, gate_points = _header_gate_geometry(f.header)
+    gate_length, gate_points = _header_gate_geometry(a.header)
     gate_length = gate_length or 1.0
 
-    azimuth0 = float(rays[0].azimuth) if rays[0].azimuth is not None else 0.0
+    azimuth0 = (float(a.azimuth[0]) if np.isfinite(a.azimuth[0])
+                else 0.0)
     a0 = np.deg2rad(azimuth0)
     # unit vectors of the x (towards azimuth0) and y (towards
     # azimuth0 - 90) axes in east/north components
     ex = (np.sin(a0), np.cos(a0))
     ey = (-np.cos(a0), np.sin(a0))
 
-    xs: List[np.ndarray] = []
-    ys: List[np.ndarray] = []
-    zs: List[np.ndarray] = []
-    velocities: List[np.ndarray] = []
-    betas: List[np.ndarray] = []
-    intensities: List[np.ndarray] = []
-    for r in rays:
-        gate_range = _gate_range(_ray_gate_index(r), gate_length,
-                                 gate_points)
-        east, north, up = _tilt_corrected_unit_vector(
-            r.azimuth if r.azimuth is not None else 0.0,
-            r.elevation if r.elevation is not None else 0.0,
-            r.pitch, r.roll)
-        xs.append(gate_range * (east * ex[0] + north * ex[1]))
-        ys.append(gate_range * (east * ey[0] + north * ey[1]))
-        zs.append(gate_range * up)
-        velocities.append(
-            pd.to_numeric(r.data['Doppler'], errors='coerce').to_numpy())
-        betas.append(
-            pd.to_numeric(r.data['Beta'], errors='coerce').to_numpy())
-        intensities.append(
-            pd.to_numeric(r.data['Intensity'], errors='coerce').to_numpy())
+    # (n_rays, n_gates) ranges, (n_rays, 1) pointing vectors; flattened
+    # ray by ray, gate by gate
+    gate_range = _gate_range(_gate_index_array(a.gate), gate_length,
+                             gate_points)
+    east, north, up = (v[:, None] for v in _tilt_corrected_unit_vectors(
+        a.azimuth, a.elevation, a.pitch, a.roll))
+    x = (gate_range * (east * ex[0] + north * ex[1])).ravel()
+    y = (gate_range * (east * ey[0] + north * ey[1])).ravel()
+    z = (gate_range * up).ravel()
 
-    def _cat(parts: List[np.ndarray]) -> np.ndarray:
-        return np.concatenate(parts).astype(float) if parts else np.array([])
-
-    intensity = _cat(intensities)
+    intensity = a.intensity.astype(float).ravel()
     return ScanPointsData(
-        timestamp=f.timestamp,
-        x=_cat(xs), y=_cat(ys), z=_cat(zs),
-        velocity=_mask_below(_cat(velocities), intensity, intensity_min),
-        beta=_mask_below(_cat(betas), intensity, intensity_min),
+        timestamp=a.timestamp,
+        x=x, y=y, z=z,
+        velocity=_mask_below(a.doppler.astype(float).ravel(), intensity,
+                             _f32_threshold(intensity_min)),
+        beta=_mask_below(a.beta.astype(float).ravel(), intensity,
+                         _f32_threshold(intensity_min)),
         path=path,
         azimuth0=azimuth0,
         intensity=intensity,

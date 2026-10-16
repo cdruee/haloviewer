@@ -144,6 +144,9 @@ on its own:
    * - :mod:`haloviewer.hpl`
      - ``.hpl`` file format parser (adapted from the ``hpl`` module of
        `cdruee/python-readmet <https://github.com/cdruee/python-readmet>`_)
+   * - :mod:`haloviewer.cache`
+     - on-disk cache of parsed scan files, so each file is parsed only
+       once (see :ref:`scan-cache`)
    * - :mod:`haloviewer.scan`
      - finds ``.hpl`` files under a root directory, classifies them by
        kind from the filename, indexes by timestamp

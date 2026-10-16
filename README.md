@@ -117,6 +117,7 @@ on its own:
 | module | responsibility |
 |---|---|
 | `haloviewer.hpl` | `.hpl` file format parser (adapted from [cdruee/python-readmet](https://github.com/cdruee/python-readmet)'s `hpl` module) |
+| `haloviewer.cache` | on-disk cache of parsed scan files, so each file is parsed only once (see below) |
 | `haloviewer.scan` | finds `.hpl` files under a root directory, classifies them by kind from the filename, indexes by timestamp |
 | `haloviewer.data` | turns parsed files into plain numpy/pandas arrays ready to plot |
 | `haloviewer.plotting` | **pure matplotlib**, no GUI toolkit imports: figure/axes creation and drawing functions |
@@ -131,6 +132,22 @@ on its own:
 matplotlib drawing primitives directly -- it only calls functions in
 `plotting.py`. This means the exact same plotting code is used by the
 GUI, the CLI, and any script that imports `haloviewer.api`.
+
+### Scan cache
+
+Parsing a large `.hpl` file takes a noticeable fraction of a second, so
+HaloViewer keeps every regular scan file it has read as a compact numpy
+`.npz` file in a per-user cache directory, and reads it from there next
+time (dozens of times faster). On start-up the viewer brings the cache up to
+date in the background, newest files first, and removes entries whose
+source file was changed or deleted. Nothing beyond numpy is needed.
+
+* Location: `~/.cache/haloviewer` (Linux), `%LOCALAPPDATA%\haloviewer\Cache`
+  (Windows), `~/Library/Caches/haloviewer` (macOS); about half the size
+  of the `.hpl` files.
+* The environment variable `HALOVIEWER_CACHE` sets another directory,
+  or switches the cache off (`HALOVIEWER_CACHE=off`).
+* The cache can be deleted at any time; it is rebuilt as needed.
 
 ### Extending to more scan kinds
 

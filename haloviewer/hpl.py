@@ -15,7 +15,9 @@ Most changes are cosmetic (module path, a couple of type-hint
 compatibility tweaks); the one functional change is adding ``'Stare'``
 to :data:`TYPES`, so a ``Scan type: Stare`` header (a real Halo scan
 pattern the original whitelist didn't include) parses instead of
-raising.
+raising. Added here: :class:`ScanArrays` and :func:`read_scan_arrays`,
+a much faster reader for regular scan files that returns plain numpy
+arrays (and falls back to :class:`DataFile` for irregular files).
 
 A ``.hpl`` file holds one scan of Doppler-lidar line-of-sight wind data.
 Two variants are supported:
@@ -659,3 +661,230 @@ def read(pattern, number=None, azimuth=None, elevation=None):
     for c in fields:
         fields[c].sort_index(inplace=True)
     return fields
+
+
+# ------------------------------------------------------------------------
+# Fast, array-based reader for regular scan files
+# ------------------------------------------------------------------------
+
+#: per-gate quantities kept by :class:`ScanArrays`, keyed by the
+#: ``Data line 2`` variable name they come from
+SCAN_ARRAY_FIELDS = {'Range Gate': 'gate', 'Doppler': 'doppler',
+                     'Intensity': 'intensity', 'Beta': 'beta'}
+
+#: per-ray quantities kept by :class:`ScanArrays`, keyed by the
+#: ``Data line 1`` variable name they come from
+SCAN_RAY_FIELDS = {'Azimuth': 'azimuth', 'Elevation': 'elevation',
+                   'Pitch': 'pitch', 'Roll': 'roll'}
+
+
+class ScanArrays(object):
+    """
+    The contents of one regular scan file as plain numpy arrays -- the
+    same information as a :class:`DataFile`'s :attr:`~DataFile.rays`,
+    but one array per quantity instead of one object per ray, which is
+    far quicker to build, to process and to store (see
+    :mod:`haloviewer.cache`).
+
+    Per-gate arrays have the shape ``(n_rays, n_gates)``; per-ray arrays
+    the shape ``(n_rays,)``. A quantity the file doesn't provide is all
+    ``nan``. The per-gate measurements are held as ``float32``, which
+    keeps every digit the file format writes (at most 7 significant
+    digits) and halves the memory and cache size; :attr:`gate` falls
+    back to ``0 .. n_gates - 1`` without a ``Range Gate`` column.
+
+    Attributes:
+
+    * ``header`` -- the decoded header (as :attr:`DataFile.header`)
+    * ``timestamp`` -- scan start time (``Start time`` header entry)
+    * ``type`` -- scan type, one of :data:`TYPES`; ``mode`` -- scan mode
+      (``csm``, ``overlapping``, ``stepped`` or ``''``)
+    * ``time`` -- ``datetime64[ns]`` time of every ray
+    * ``azimuth``, ``elevation``, ``pitch``, ``roll`` -- per-ray angles
+      (degrees)
+    * ``gate``, ``doppler``, ``intensity``, ``beta`` -- per-gate values
+      (``Range Gate``, ``Doppler``, ``Intensity``, ``Beta``)
+    """
+
+    def __init__(self, header, timestamp, type_, mode, time,
+                 azimuth, elevation, pitch, roll,
+                 gate, doppler, intensity, beta):
+        self.header = header
+        self.timestamp = timestamp
+        self.type = type_
+        self.mode = mode
+        self.time = time
+        self.azimuth = azimuth
+        self.elevation = elevation
+        self.pitch = pitch
+        self.roll = roll
+        self.gate = gate
+        self.doppler = doppler
+        self.intensity = intensity
+        self.beta = beta
+
+    @property
+    def n_rays(self) -> int:
+        return int(self.time.shape[0])
+
+    @property
+    def n_gates(self) -> int:
+        return int(self.doppler.shape[1]) if self.doppler.ndim == 2 else 0
+
+
+def _header_info(d):
+    """Decode ``d.header`` (already parsed) into
+    ``(timestamp, type, mode)``, exactly as :meth:`DataFile.load` does."""
+    starttime = d.header['starttime'].strip()
+    if '.' not in starttime:
+        starttime += '.0'
+    timestamp = pd.to_datetime(starttime, format='%Y%m%d %H:%M:%S.%f')
+    type_, mode = d._parse_scantype(d.header['scantype'])
+    return timestamp, type_, mode
+
+
+def _ray_times(timestamp, hours):
+    """Ray times from the decimal hours of day, as :meth:`DataFile._read_ray`
+    does (the hours replace the time of day of the file's start date)."""
+    daystart = np.datetime64(timestamp.normalize().to_datetime64(), 'ns')
+    hours = np.asarray(hours, dtype=float)
+    ok = np.isfinite(hours)
+    # same arithmetic (and truncation) as pd.Timedelta(hours=...)
+    ns = np.zeros(hours.shape, dtype='int64')
+    ns[ok] = (hours[ok] * 3600 * 1e9).astype('int64')
+    out = daystart + ns.astype('timedelta64[ns]')
+    out[~ok] = np.datetime64('NaT', 'ns')
+    return out
+
+
+def _assemble(header, timestamp, type_, mode, names_1, values_1,
+              names_2, values_2, n_rays, n_gates, time=None):
+    """Build a :class:`ScanArrays` from per-ray values ``(n_rays,
+    len(names_1))`` and per-gate values ``(n_rays, n_gates,
+    len(names_2))``; ``time`` overrides the ray times otherwise computed
+    from the ``Decimal time`` column."""
+    def ray_col(name):
+        if name in names_1:
+            return values_1[:, names_1.index(name)].astype(float)
+        return np.full(n_rays, np.nan)
+
+    def gate_col(name):
+        if name in names_2:
+            return values_2[:, :, names_2.index(name)].astype(np.float32)
+        return np.full((n_rays, n_gates), np.nan, dtype=np.float32)
+
+    if time is not None:
+        time = np.asarray(time, dtype='datetime64[ns]')
+    elif 'Decimal time' in names_1:
+        time = _ray_times(timestamp, ray_col('Decimal time'))
+    else:
+        time = np.full(n_rays, np.datetime64(timestamp.to_datetime64(), 'ns'))
+    gate = gate_col('Range Gate')
+    if 'Range Gate' not in names_2:
+        gate = np.broadcast_to(np.arange(n_gates, dtype=np.float32),
+                               (n_rays, n_gates)).copy()
+    kw = {attr: ray_col(name) for name, attr in SCAN_RAY_FIELDS.items()}
+    return ScanArrays(header, timestamp, type_, mode, time,
+                      gate=gate, doppler=gate_col('Doppler'),
+                      intensity=gate_col('Intensity'), beta=gate_col('Beta'),
+                      **kw)
+
+
+def scan_arrays_from_datafile(d):
+    """Convert an already loaded regular-scan :class:`DataFile` into a
+    :class:`ScanArrays` (the slow but tolerant path, used by
+    :func:`read_scan_arrays` for files the fast reader can't handle).
+
+    :raises ValueError: if ``d`` is a "Processed Wind Profile" file.
+    """
+    if d.profile is not None or d.vars is None:
+        raise ValueError(f'{d.file} is not a regular scan file')
+    names_1 = list(d.header.get('variables_1', []))
+    names_2 = list(d.header.get('variables_2', []))
+    rays = d.rays or []
+    n_rays = len(rays)
+    n_gates = max((len(r.data.index) for r in rays), default=0)
+    values_1 = np.full((n_rays, len(names_1)), np.nan)
+    values_2 = np.full((n_rays, n_gates, len(names_2)), np.nan)
+    for i, r in enumerate(rays):
+        for j, name in enumerate(names_1):
+            v = getattr(r, SCAN_RAY_FIELDS.get(name, ''), None)
+            if v is not None:
+                values_1[i, j] = v
+        ng = len(r.data.index)
+        for j, name in enumerate(names_2):
+            if name in r.data.columns:
+                values_2[i, :ng, j] = pd.to_numeric(
+                    r.data[name], errors='coerce').to_numpy(dtype=float)
+    time = pd.DatetimeIndex([r.time for r in rays]).to_numpy(
+        dtype='datetime64[ns]') if rays else np.array([], 'datetime64[ns]')
+    return _assemble(d.header, d.timestamp, d.type, d.mode, names_1,
+                     values_1, names_2, values_2, n_rays, n_gates,
+                     time=time)
+
+
+def read_scan_arrays(file):
+    """
+    Read a regular scan ``.hpl`` file straight into a
+    :class:`ScanArrays` -- the fast counterpart of :class:`DataFile`
+    (about ten times quicker on large files), parsing all rays in one
+    go with numpy instead of one small table per ray.
+
+    It follows :class:`DataFile` in every respect that matters: the
+    same header decoding, the same handling of a truncated file (only
+    complete ray blocks are read, with the same warning). Any file whose
+    data block doesn't have the exact regular layout it expects (a
+    different number of values on some line, unparsable numbers) is
+    handed to :class:`DataFile` instead, so the result -- or the error
+    raised -- is never worse than before.
+
+    :param file: path to a regular scan ``.hpl`` file.
+    :raises ValueError: if the file is a "Processed Wind Profile" \
+        file, or its header can't be decoded.
+    :raises IOError: if the file can't be read or has no data block.
+    """
+    file = str(file)
+    with open(file, 'r') as f:
+        lines = f.read().splitlines()
+    if not lines or ':' not in lines[0]:
+        raise ValueError(f'{file} is not a regular scan file')
+    d = DataFile()
+    d.file = file
+    d.text = lines
+    d.header = d._get_header()
+    timestamp, type_, mode = _header_info(d)
+    for nl, line in enumerate(lines):
+        if MARKER.match(line):
+            data_start = nl + 1
+            break
+    else:
+        raise IOError('data block not found in file')
+    names_1 = list(d.header['variables_1'])
+    names_2 = list(d.header['variables_2'])
+    nrays = int(float(d.header['rays']))
+    ngates = int(float(d.header['gates']))
+    block = ngates + 1
+    available = max(0, (len(lines) - data_start) // block)
+    if available < nrays:
+        logger.warning(
+            '%s: header declares %d ray(s) but only %d complete '
+            'ray block(s) (%d gates each) are present -- the file '
+            'looks truncated; reading only the %d complete ray(s) '
+            'found.', file, nrays, available, ngates, available)
+        nrays = available
+    data = lines[data_start:data_start + nrays * block]
+    ray_lines = data[::block]
+    del data[::block]
+    try:
+        values_1 = np.array(' '.join(ray_lines).split(), dtype=float)
+        values_2 = np.array(' '.join(data).split(), dtype=float)
+        if (values_1.size != nrays * len(names_1)
+                or values_2.size != nrays * ngates * len(names_2)):
+            raise ValueError('irregular data block')
+    except ValueError:
+        logger.debug('%s: irregular data block, using DataFile', file)
+        return scan_arrays_from_datafile(DataFile(file))
+    return _assemble(d.header, timestamp, type_, mode, names_1,
+                     values_1.reshape(nrays, len(names_1)), names_2,
+                     values_2.reshape(nrays, ngates, len(names_2)),
+                     nrays, ngates)

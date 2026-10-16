@@ -51,6 +51,7 @@ inverse-distance-weighted interpolation instead of drawing individual dots.
 from __future__ import annotations
 
 import sys
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -63,6 +64,7 @@ from matplotlib.backends.backend_tkagg import (FigureCanvasTkAgg,
                                                 NavigationToolbar2Tk)
 
 from . import __version__
+from . import cache as _cache
 from . import data as _data
 from . import plotting
 from .scan import (PPI_MODE, PROFILE_MODE, RHI_MODE, SINGLE_SCAN_MODES,
@@ -407,6 +409,10 @@ class HaloViewerApp:
         self._last_points = None
         self._kind_names: List[str] = []
 
+        # background build of the scan cache (see _start_cache_build)
+        self._cache_stop: Optional[threading.Event] = None
+        self._cache_state: Tuple[str, int, int] = ('idle', 0, 0)
+
         self._build_widgets()
         self._update_range_controls_enabled(None)
 
@@ -617,6 +623,13 @@ class HaloViewerApp:
         status_label = ttk.Label(parent, textvariable=self.status_var,
                                   wraplength=260, foreground='#444444')
         status_label.grid(row=row, column=0, sticky='we', pady=(8, 0))
+        row += 1
+        cache = _cache.get_default_cache()
+        self.cache_var = tk.StringVar(
+            value='Cache: off' if cache is None else '')
+        ttk.Label(parent, textvariable=self.cache_var, wraplength=260,
+                  foreground='#777777').grid(
+            row=row, column=0, sticky='we', pady=(4, 0))
 
     def _build_right_panel(self, parent: ttk.Frame) -> None:
         self.plot_container = ttk.Frame(parent)
@@ -714,6 +727,7 @@ class HaloViewerApp:
             self._select_kind(kinds[0])
             self.status_var.set(
                 f'Found {len(kinds)} file kind(s) under {path}.')
+            self._start_cache_build()
         else:
             self.kind_var.set('')
             self.current_kind = None
@@ -721,6 +735,71 @@ class HaloViewerApp:
             self._update_range_controls_enabled(None)
             self._show_message(f'No .hpl files found under\n{path}')
             self.status_var.set(f'No .hpl files found under {path}.')
+
+    # ------------------------------------------------------------------
+    # scan cache
+    # ------------------------------------------------------------------
+
+    def _start_cache_build(self) -> None:
+        """Bring the scan cache (:mod:`haloviewer.cache`) up to date for
+        every regular scan file found, in a background thread: newest
+        files first (the default view is the last 24 h), then remove
+        stale entries. The viewer stays usable meanwhile -- a file not
+        cached yet is simply parsed when it is plotted (and cached then).
+        """
+        if self._cache_stop is not None:
+            self._cache_stop.set()
+        cache = _cache.get_default_cache()
+        if cache is None or self.scan_result is None:
+            return
+        entries = [e for kind in self.scan_result.kinds()
+                   if kind != 'Processed_Wind_Profile'
+                   and get_kind_info(kind).supported
+                   for e in self.scan_result.files(kind)]
+        entries.sort(key=lambda e: e.timestamp, reverse=True)
+        paths = [e.path for e in entries]
+        stop = threading.Event()
+        self._cache_stop = stop
+        self._cache_state = ('checking', 0, 0)
+
+        def progress(done, total):
+            self._cache_state = ('building', done, total)
+
+        def work():
+            try:
+                cache.build(paths, stop=stop, progress=progress,
+                            pause=0.005)
+                if not stop.is_set():
+                    cache.prune(stop=stop)
+                    self._cache_state = ('done', len(paths),
+                                         cache.size_bytes())
+            except Exception as exc:  # noqa: BLE001 -- never kill the GUI
+                self._cache_state = ('error', 0, 0)
+                print(f'HaloViewer: cache build failed: {exc}',
+                      file=sys.stderr)
+
+        threading.Thread(target=work, name='haloviewer-cache',
+                         daemon=True).start()
+        self._poll_cache(stop)
+
+    def _poll_cache(self, stop: threading.Event) -> None:
+        """Show the background cache build's progress (Tk widgets may
+        only be touched from the main thread, so it is polled)."""
+        if stop is not self._cache_stop:
+            return  # superseded by a newer build
+        state, a, b = self._cache_state
+        if state == 'checking':
+            self.cache_var.set('Cache: checking…')
+        elif state == 'building':
+            self.cache_var.set(f'Cache: preparing files… {a}/{b}')
+        elif state == 'done':
+            self.cache_var.set(
+                f'Cache: {a} file(s) ready ({b / 1e6:.0f} MB)')
+        elif state == 'error':
+            self.cache_var.set('Cache: not available')
+        if state in ('done', 'error') or stop.is_set():
+            return
+        self.root.after(500, self._poll_cache, stop)
 
     # ------------------------------------------------------------------
     # selection handlers
