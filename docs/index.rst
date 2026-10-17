@@ -20,6 +20,20 @@ as dots or, optionally, filled by inverse-distance-weighted interpolation.
 Any other kind found on disk is still listed (so you can see what's in
 your data tree) but reported as not yet implemented.
 
+|docs-badge| |pypi-badge| |source-badge|
+
+.. |docs-badge| image:: https://img.shields.io/badge/docs-GitLab%20Pages-blue
+   :target: https://uwm.gitlab-pages.uni-trier.de/lidar/haloviewer/
+   :alt: Documentation
+
+.. |pypi-badge| image:: https://img.shields.io/pypi/v/HaloViewer
+   :target: https://pypi.org/project/HaloViewer/
+   :alt: PyPI
+
+.. |source-badge| image:: https://img.shields.io/badge/source-GitHub-181717?logo=github
+   :target: https://github.com/cdruee/haloviewer
+   :alt: Source code
+
 .. figure:: images/haloviewer_rhi.png
    :width: 80%
    :align: center
@@ -67,55 +81,66 @@ Sphinx from the project root; the HTML ends up in ``build/html/``:
    pip install -e ".[docs]"
    sphinx-build -b html docs build/html
 
-Version numbers come from the git history via `setuptools-scm
-<https://setuptools-scm.readthedocs.io>`_: tag a release (e.g.
-``git tag v0.2.0``) and reinstall, and :data:`haloviewer.__version__`
-follows. Without git metadata the version falls back to ``0.1.0``.
-
 Contents
 --------
 
-HaloViewer provides four ways to work with the data:
+HaloViewer provides four ways to work with the data. Each has its own
+page with the details.
 
-:doc:`viewer` -- ``haloviewer``
-   A Tkinter desktop application for browsing a ``Proc`` tree: pick a
-   directory, a file kind and a plot type (*Profile*, *History*, *RHI*
-   or *PPI*), then step through single files or whole time windows, with
-   adjustable height, distance and speed ranges.
+Graphic viewer -- ``haloviewer``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-   .. code:: bash
+A Tkinter desktop application for browsing a ``Proc`` tree: pick a
+directory, a file kind and a plot type (*Profile*, *History*, *RHI* or
+*PPI*), then step through single files or whole time windows, with
+adjustable height, distance and speed ranges. See :doc:`viewer`.
 
-      haloviewer /path/to/Data/Proc
+.. code:: bash
 
-:doc:`cli` -- ``haloplot``
-   Plots files, directories or glob patterns straight to an image file,
-   without the GUI. File kind, plot mode and time range are inferred
-   where possible and can be set explicitly.
+   haloviewer /path/to/Data/Proc
 
-   .. code:: bash
+Command-line tool -- ``haloplot``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-      haloplot Proc/2026/202609 --kind RHI --start 24h -p rhi_24h.png
+Plots files, directories or glob patterns straight to an image file,
+without the GUI. File kind, plot mode and time range are inferred where
+possible and can be set explicitly. See :doc:`cli`.
 
-:doc:`sync` -- ``halosync``
-   A separate GUI for selectively copying the ``Metek``, ``Proc`` and
-   ``Raw`` trees from the lidar control PC to a backup or analysis disk.
-   It skips files that are already there, leaves out the file the lidar
-   is still writing, and can run on a fixed schedule.
+.. code:: bash
 
-   .. code:: bash
+   haloplot Proc/2026/202609 --kind RHI --start 24h -p rhi_24h.png
 
-      halosync
+Sync tool -- ``halosync``
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:doc:`api` -- ``haloviewer.plot()``
-   The same functionality as ``haloplot`` for scripts and notebooks. It
-   returns a matplotlib :class:`~matplotlib.figure.Figure` for further
-   customisation.
+A separate GUI for selectively copying the ``Metek``, ``Proc`` and
+``Raw`` trees from the lidar control PC to a backup or analysis disk.
+It skips files that are already there, leaves out the file the lidar is
+still writing, and can run on a fixed schedule. See :doc:`sync`.
 
-   .. code:: python
+.. code:: bash
 
-      import haloviewer
-      fig = haloviewer.plot("Proc/2026/202609/20260919",
-                            kind="Processed_Wind_Profile", start="24h")
+   halosync
+
+Python API -- ``haloviewer.plot()``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The same functionality as ``haloplot`` for scripts and notebooks. It
+returns a matplotlib :class:`~matplotlib.figure.Figure` for further
+customisation. See :doc:`api`.
+
+.. code:: python
+
+   import haloviewer
+   fig = haloviewer.plot("Proc/2026/202609/20260919",
+                         kind="Processed_Wind_Profile", start="24h")
+
+Design
+------
+
+How the code is organised (modules, scan cache and settings, version
+numbers), how to add support for further scan kinds, and how to run the
+tests is described in :doc:`design`.
 
 .. toctree::
    :maxdepth: 2
@@ -125,95 +150,7 @@ HaloViewer provides four ways to work with the data:
    cli
    sync
    api
-
-Design
-------
-
-File structure
-~~~~~~~~~~~~~~
-
-The code is layered so each piece can be used, tested and understood
-on its own:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 25 75
-
-   * - module
-     - responsibility
-   * - :mod:`haloviewer.hpl`
-     - ``.hpl`` file format parser (adapted from the ``hpl`` module of
-       `cdruee/python-readmet <https://github.com/cdruee/python-readmet>`_)
-   * - :mod:`haloviewer.settings`
-     - remembered settings (``settings.json``) and the cache and
-       ``--info`` command-line options shared by ``haloviewer`` and
-       ``haloplot``
-   * - :mod:`haloviewer.cache`
-     - on-disk cache of parsed scan files, so each file is parsed only
-       once (see :ref:`scan-cache`)
-   * - :mod:`haloviewer.scan`
-     - finds ``.hpl`` files under a root directory, classifies them by
-       kind from the filename, indexes by timestamp
-   * - :mod:`haloviewer.data`
-     - turns parsed files into plain numpy/pandas arrays ready to plot
-   * - :mod:`haloviewer.plotting`
-     - **pure matplotlib**, no GUI toolkit imports: figure/axes creation
-       and drawing functions
-   * - :mod:`haloviewer.api`
-     - programmatic entry points (``plot``, ``plot_file``,
-       ``plot_files``); ``plot`` also re-exported as ``haloviewer.plot``
-   * - ``haloviewer.cli``
-     - command-line interface (``haloplot``) on top of ``api``
-   * - ``haloviewer.gui``
-     - Tkinter desktop app (``haloviewer``); wires widgets to
-       ``scan``/``data``/``plotting`` and contains no plotting logic
-       itself
-   * - ``haloviewer.halosync``
-     - standalone data-sync GUI (``halosync``); standard library only,
-       independent of the other modules
-   * - ``haloviewer._metadata``, ``haloviewer._version``
-     - static project information; version number generated by
-       setuptools-scm
-
-``plotting.py`` never imports ``tkinter``, and ``gui.py`` never calls
-matplotlib drawing primitives directly -- it only calls functions in
-``plotting.py``. This means the exact same plotting code is used by the
-GUI, the CLI, and any script that imports :mod:`haloviewer.api`.
-
-Extending to more scan kinds
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-``Processed_Wind_Profile``, ``VAD``, ``Stare``, ``Wind_Profile`` and ``RHI`` are
-all implemented; a user-defined pattern (``User1``...\ ``User5`` in the raw
-``.hpl`` header's ``Scan type``) or a future Halo scan kind would follow
-the same recipe:
-
-1. Add a reader to ``data.py`` that turns a parsed ``hpl.DataFile`` (or a
-   set of them) into plain arrays. A regular scan file can usually reuse
-   ``load_scan_history`` and ``load_scan_points`` as they are.
-2. Add drawing function(s) to ``plotting.py`` that take those arrays and
-   axes/figure objects -- reuse ``create_timeseries_figure``'s two
-   stacked, colour-mapped panels (all History flavours) or
-   ``create_scan_pair_figure``'s two side-by-side panels (the RHI/PPI
-   views) if one of those shapes fits.
-3. Register the kind's capabilities in ``scan.KIND_CAPABILITIES``
-   (``supported=True``, its plot modes).
-4. Wire the new mode(s) into ``api.plot_file``/``plot_files``, and into
-   ``gui.HaloViewerApp._plot_kind`` (which of the five load/render
-   pipelines applies) and ``_update_range_controls_enabled`` (which of
-   Height/Distance/Speed/Fill make sense for it).
-
-The GUI will then automatically offer that kind and mode as soon as it
-is discovered on disk -- no other GUI changes are needed.
-
-Tests
-~~~~~
-
-
-.. code:: bash
-
-   pip install -e ".[dev]"
-   pytest
+   design
 
 Licence
 -------

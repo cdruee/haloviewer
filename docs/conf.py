@@ -122,6 +122,9 @@ rst_epilog = f"""
 
 html_theme = "nature"
 html_title = f"{meta.__product__} {release}"
+# shown at the top of the sidebar, and as the browser tab icon
+html_logo = "images/haloviewer_logo.png"
+html_favicon = "images/haloviewer_logo.png"
 html_static_path = []
 html_show_sourcelink = False
 
