@@ -118,7 +118,6 @@ build_deb:
     - apt-get -y install python3-numpy python3-pandas
     - apt-get -y install python3-setuptools python3-stdeb
     - apt-get -y install python3-setuptools-scm python3-build
-    - apt-get -y install pybuild-plugin-pyproject
     - apt-get -y install gpg
     - bash -x ./ci_build_deb.sh $BUILD_VERSION
     - echo "DEB_${DISTRIB^^}_VERSION=$( cd deb_dist/$DISTRIB && ls *deb )" | tee -a  build.env
@@ -306,9 +305,9 @@ merge_github:
     # Stage all changes and commit
     - git add -A
     - git diff-index --quiet --cached HEAD || git commit -m "Squash merge main into github ($CI_COMMIT_TAG)"
-    # - git push origin github
-    ## Push tag to github branch
-    # - if [ -n "$CI_COMMIT_TAG" ]; then git push origin $CI_COMMIT_TAG; fi
+    - git push origin github
+    # Push tag to github branch
+    - if [ -n "$CI_COMMIT_TAG" ]; then git push origin $CI_COMMIT_TAG; fi
 
 release_deb:
   image: ubuntu:latest
