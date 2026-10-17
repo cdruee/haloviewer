@@ -34,30 +34,31 @@ Colour choices:
   to look visually distinct from speed's ``viridis`` at a glance.
 * Beta / backscatter (also sequential) uses ``magma``, likewise
   perceptually uniform and distinct from both of the above.
-* Radial velocity (RHI's Doppler value, which is signed -- towards vs.
-  away from the instrument) uses ``PuOr``, a perceptually-balanced
-  *diverging* colormap that avoids the red/green endpoints most likely
-  to be confused under red-green colour vision deficiency.
+* Radial velocity (the RHI/PPI views' Doppler value, which is signed --
+  towards vs. away from the instrument) uses ``PuOr``, a
+  perceptually-balanced *diverging* colormap that avoids the red/green
+  endpoints most likely to be confused under red-green colour vision
+  deficiency.
 """
 
 from __future__ import annotations
 
-import os
-from typing import Optional, Sequence, Tuple
+import warnings
+from typing import List, Optional, Sequence, Tuple
 
+import matplotlib.dates as mdates
 import numpy as np
-if os.environ.get('BUILDING_SPHINX', 'false') == 'false':
-    import matplotlib.dates as mdates
-    from matplotlib.figure import Figure
-else:
-    mdates = Figure = None
+from matplotlib.figure import Figure
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 __all__ = [
     'SPEED_CMAP', 'DIRECTION_CMAP', 'INTENSITY_CMAP', 'BETA_CMAP',
-    'VELOCITY_CMAP', 'MAX_AUTOSCALE_SPEED',
+    'VELOCITY_CMAP', 'MAX_AUTOSCALE_SPEED', 'FILL_GRID_SIZE',
+    'FILL_NEIGHBOURS', 'FILL_POWER',
     'create_profile_figure', 'plot_wind_profile',
     'create_timeseries_figure', 'plot_wind_timeseries',
-    'plot_scan_history', 'plot_rhi_cross_section',
+    'plot_scan_history',
+    'create_scan_pair_figure', 'plot_rhi', 'plot_ppi', 'scan_view_title',
 ]
 
 SPEED_CMAP = 'viridis'
@@ -79,6 +80,10 @@ MAX_AUTOSCALE_SPEED = 50.0
 #: many degrees is a wrap-around artifact (e.g. 355 degrees to 5 degrees,
 #: a 10 degree turn) rather than a real jump, and is not drawn.
 _DIRECTION_WRAP_THRESHOLD = 180.0
+
+#: Number of cells along each axis of the grid the RHI/PPI "Fill"
+#: option paints (see :func:`_idw_fill`).
+FILL_GRID_SIZE = 400
 
 
 def _auto_speed_max(speed: np.ndarray, pad: float = 1.1) -> float:
@@ -256,9 +261,9 @@ def create_timeseries_figure(
     every kind of History plot (:func:`plot_wind_timeseries` for
     ``Processed_Wind_Profile``'s speed/direction,
     :func:`plot_scan_history` for the raw scan kinds' intensity/beta)
-    *and* for RHI's own Profile mode (:func:`plot_rhi_cross_section`,
-    a scatter rather than a gridded image, but the same axes shape) --
-    the content differs, the geometry doesn't.
+    -- the content differs, the geometry doesn't. (The single-scan
+    RHI/PPI views use the side-by-side
+    :func:`create_scan_pair_figure` instead.)
 
     :param figsize: figure size in inches. Ignored if ``fig`` is given.
     :param fig: an existing (empty) figure to build the axes on; see \
@@ -427,89 +432,499 @@ def plot_scan_history(
 
 
 # =========================================================================
-# RHI cross section plot: a single scan's distance/height cross
-# section, radial velocity and beta as colour-coded scatter points
-# (rays don't share a common distance/height grid the way a fixed scan
-# geometry would, so this is not gridded like the images above). Same
-# panel shape as the two plots above, again from create_timeseries_figure.
+# Single-scan RHI / PPI views: one scan's (gate, ray) points projected
+# onto the vertical x/z plane (RHI) or the horizontal x/y plane (PPI),
+# x pointing along the first ray's azimuth (see
+# data.ScanPointsData). Radial velocity and beta side by side, each
+# either as colour-coded scatter points or -- with ``fill`` -- as a
+# inverse-distance-weighted filled image.
 # =========================================================================
 
-def plot_rhi_cross_section(
-        ax_vel, ax_beta, cax_vel, cax_beta,
-        distance: np.ndarray, height: np.ndarray,
-        velocity: np.ndarray, beta: np.ndarray,
-        *,
-        distance_xlim: Optional[Tuple[float, float]] = None,
-        height_ylim: Optional[Tuple[float, float]] = None,
-        speed_vlim: Optional[Tuple[float, float]] = None,
-        title: Optional[str] = None,
-        marker_size: float = 6.0) -> None:
+def create_scan_pair_figure(
+        figsize: Tuple[float, float] = (11.0, 5.5),
+        fig: Optional[Figure] = None) -> Tuple[Figure, tuple]:
     """
-    Draw one RHI scan's distance/height cross section into an existing
-    set of axes created by :func:`create_timeseries_figure`: radial
-    velocity on top, beta below, each point placed by its own
-    (tilt-corrected) horizontal distance and height and coloured by
-    value. Clears and redraws in place.
+    Create a figure with two side-by-side panels (1 row, 2 columns)
+    sharing both the x and the y axis, each with its own horizontal
+    colorbar directly above it. This is the layout of the single-scan RHI and
+    PPI views (:func:`plot_rhi`, :func:`plot_ppi`): radial velocity on
+    the left, beta on the right.
 
-    :param ax_vel: top axes (radial velocity scatter).
-    :param ax_beta: bottom axes (beta scatter), sharing x/y with \
-        ``ax_vel``.
-    :param cax_vel: colorbar axes for the velocity scatter.
-    :param cax_beta: colorbar axes for the beta scatter.
-    :param distance: 1-D array of horizontal distance (m), one per point.
-    :param height: 1-D array of height (m), same shape as ``distance``.
-    :param velocity: 1-D array of radial (Doppler) velocity (m/s).
-    :param beta: 1-D array of attenuated backscatter.
-    :param distance_xlim: fixed ``(min, max)`` for the shared distance \
-        (x) axis; if ``None``, chosen from the data.
-    :param height_ylim: fixed ``(min, max)`` for the shared height \
-        (y) axis; if ``None``, chosen from the data.
-    :param speed_vlim: fixed ``(min, max)`` colour range for radial \
-        velocity; if ``None``, a symmetric range from the data's \
-        magnitude, capped like :data:`MAX_AUTOSCALE_SPEED`. Beta \
-        always autoscales from its own data (see \
-        :func:`_auto_vlim`) -- there is no separate manual control \
-        for it.
-    :param title: optional title drawn above the velocity panel.
+    The colorbars are attached with an axes divider rather than at
+    fixed figure coordinates, so they stay flush with their panel even
+    when the PPI view shrinks the panels to an equal (square) aspect.
+    The layout is otherwise fixed, like the other ``create_*_figure``
+    helpers.
+
+    :param figsize: figure size in inches. Ignored if ``fig`` is given.
+    :param fig: an existing (empty) figure to build the axes on; see \
+        :func:`create_profile_figure` for when to pass this.
+    :returns: ``(figure, (ax_vel, ax_beta, cax_vel, cax_beta))``.
     """
-    ax_vel.cla()
-    ax_beta.cla()
-    cax_vel.cla()
-    cax_beta.cla()
+    if fig is None:
+        fig = Figure(figsize=figsize)
+    # colorbars sit horizontally *above* their panel (not beside it), so
+    # the full width goes to the panels: a wider, less stretched RHI
+    # and a larger square PPI
+    gs = fig.add_gridspec(1, 2, wspace=0.10,
+                           left=0.07, right=0.98, top=0.80, bottom=0.10)
+    ax_vel = fig.add_subplot(gs[0, 0])
+    ax_beta = fig.add_subplot(gs[0, 1], sharex=ax_vel, sharey=ax_vel)
+    cax_vel = make_axes_locatable(ax_vel).append_axes(
+        'top', size='4%', pad=0.08)
+    cax_beta = make_axes_locatable(ax_beta).append_axes(
+        'top', size='4%', pad=0.08)
+    return fig, (ax_vel, ax_beta, cax_vel, cax_beta)
+
+
+def _convex_hull(points: np.ndarray) -> np.ndarray:
+    """Vertices of the 2-D convex hull of ``points`` (``(n, 2)``), in
+    counter-clockwise order (Andrew's monotone chain). Returns fewer
+    than 3 vertices if the points are (nearly) collinear."""
+    pts = np.unique(points, axis=0)
+    if len(pts) < 3:
+        return pts
+
+    def _half(seq):
+        out: List[np.ndarray] = []
+        for p in seq:
+            while len(out) >= 2:
+                a, b = out[-2], out[-1]
+                cross = ((b[0] - a[0]) * (p[1] - a[1]) -
+                         (b[1] - a[1]) * (p[0] - a[0]))
+                if cross > 0:
+                    break
+                out.pop()
+            out.append(p)
+        return out
+
+    lower = _half(pts)
+    upper = _half(pts[::-1])
+    return np.array(lower[:-1] + upper[:-1])
+
+
+#: Number of nearest data points each filled cell averages over (see
+#: :func:`_idw_fill`).
+FILL_NEIGHBOURS = 8
+
+#: Exponent of the inverse-distance weights (``w = 1 / d**p``) used by
+#: :func:`_idw_fill`; 2 is the common Shepard choice.
+FILL_POWER = 2.0
+
+
+def _polar_grid_steps(px: np.ndarray, py: np.ndarray
+                      ) -> Optional[Tuple[float, float]]:
+    """
+    Estimate the natural grid spacing of scan points in polar
+    coordinates around the instrument (the origin of the plotted
+    plane): ``(range_step, angle_step)`` -- the typical distance between
+    neighbouring gates along a ray (m) and between neighbouring rays
+    (radians). Used by :func:`_idw_fill` to measure distances in units
+    of these steps.
+
+    Points are grouped into rays by their (rounded) angle; the range
+    step is the median spacing of successive ranges within those rays,
+    the angle step the median spacing of successive distinct ray angles.
+
+    :returns: the two steps, or ``None`` if either can't be estimated \
+        (e.g. fewer than two distinct rays).
+    """
+    r = np.hypot(px, py)
+    th = np.arctan2(py, px)
+    ok = np.isfinite(r) & np.isfinite(th) & (r > 0)
+    if ok.sum() < 3:
+        return None
+    r, th = r[ok], th[ok]
+    key = np.round(th, 6)
+    order = np.lexsort((r, key))
+    r_s, key_s = r[order], key[order]
+    same_ray = key_s[1:] == key_s[:-1]
+    dr_all = np.diff(r_s)[same_ray]
+    dr_all = dr_all[dr_all > 0]
+    angles = np.unique(key)
+    if dr_all.size == 0 or angles.size < 2:
+        return None
+    dth_all = np.diff(angles)
+    dth_all = dth_all[dth_all > 1e-6]
+    if dth_all.size == 0:
+        return None
+    return float(np.median(dr_all)), float(np.median(dth_all))
+
+
+def _to_polar_units(xy: np.ndarray, dr: float, dth: float) -> np.ndarray:
+    """``(n, 2)`` Cartesian points -> ``(range / dr, angle / dth)``."""
+    return np.column_stack([np.hypot(xy[:, 0], xy[:, 1]) / dr,
+                            np.arctan2(xy[:, 1], xy[:, 0]) / dth])
+
+
+def _idw_fill(px: np.ndarray, py: np.ndarray,
+              values: Sequence[np.ndarray],
+              xlim: Tuple[float, float], ylim: Tuple[float, float],
+              n: int = FILL_GRID_SIZE, k: int = FILL_NEIGHBOURS,
+              power: float = FILL_POWER, polar: bool = True):
+    """
+    Inverse-distance-weighted (Shepard) interpolation of scattered
+    points onto a regular grid, for the RHI/PPI "Fill" option.
+
+    The grid (``n`` x ``n`` cells) covers the part of the view
+    (``xlim`` x ``ylim``) that the data actually span. Every cell takes
+    the weighted mean of its ``k`` nearest data points, with weights
+    ``1 / d**power``; a cell centre that coincides with a data point
+    takes that point's value exactly. Cells outside the convex hull of
+    the data points are left ``nan`` (blank), so the fill doesn't smear
+    the outermost values out over regions the scan never looked at.
+
+    **Distance metric.** Lidar points are strongly anisotropic: along a
+    ray the gates are only a few metres apart, while neighbouring rays
+    can be tens of metres apart at long range. With plain Cartesian
+    distances, all ``k`` nearest points of a cell would lie on the same
+    (nearest) ray, so every ray would just fill its own wedge and the
+    result would look like a nearest-neighbour patchwork. With
+    ``polar=True`` (the default) the distance ``d`` is therefore
+    measured in the scan's own polar grid instead: range in units of
+    the gate spacing and angle (around the instrument, in the plotted
+    plane) in units of the ray spacing, both estimated from the data
+    (:func:`_polar_grid_steps`). The nearest points of a cell then come
+    from the rays on both sides of it, and the values blend smoothly
+    between rays as well as between gates. If the spacings can't be
+    estimated (e.g. a single ray), Cartesian distances are used.
+
+    Points whose value is ``nan`` (e.g. removed by the intensity
+    filter) are left out of the weighted mean, except that a cell whose
+    *nearest* point is such a ``nan`` point stays blank -- so
+    filtered-out regions stay blank rather than being papered over by
+    their neighbours.
+
+    Needs :mod:`scipy` (``scipy.spatial.cKDTree``).
+
+    :param px: x coordinates of the data points.
+    :param py: y coordinates of the data points (same shape).
+    :param values: one or more value arrays (same shape as ``px``).
+    :param xlim: ``(min, max)`` of the view in x.
+    :param ylim: ``(min, max)`` of the view in y.
+    :param n: grid cells per axis.
+    :param k: number of nearest points per cell (capped at the number \
+        of points).
+    :param power: exponent of the inverse-distance weights.
+    :param polar: measure distances in the scan's normalised polar \
+        grid (see above) rather than in metres.
+    :returns: ``(extent, grids)`` -- ``extent`` is ``(x0, x1, y0, y1)`` \
+        for :meth:`~matplotlib.axes.Axes.imshow` and ``grids`` a list \
+        of ``(n, n)`` arrays (row 0 at ``y0``), one per ``values`` \
+        entry -- or ``None`` if no fill is possible (fewer than three \
+        non-collinear points, or no overlap with the view).
+    """
+    from matplotlib.path import Path as _MplPath
+    from scipy.spatial import cKDTree
+
+    px = np.asarray(px, dtype=float)
+    py = np.asarray(py, dtype=float)
+    ok = np.isfinite(px) & np.isfinite(py)
+    if ok.sum() < 3:
+        return None
+    pts = np.column_stack([px[ok], py[ok]])
+    hull = _convex_hull(pts)
+    if len(hull) < 3:
+        return None
+
+    x0 = max(min(xlim), float(pts[:, 0].min()))
+    x1 = min(max(xlim), float(pts[:, 0].max()))
+    y0 = max(min(ylim), float(pts[:, 1].min()))
+    y1 = min(max(ylim), float(pts[:, 1].max()))
+    if not (x1 > x0 and y1 > y0):
+        return None
+
+    gx = x0 + (np.arange(n) + 0.5) * (x1 - x0) / n
+    gy = y0 + (np.arange(n) + 0.5) * (y1 - y0) / n
+    mx, my = np.meshgrid(gx, gy)
+    cells = np.column_stack([mx.ravel(), my.ravel()])
+
+    # a tiny tolerance keeps cells whose centre sits exactly on the
+    # hull boundary (e.g. along a straight outermost ray)
+    span = max(x1 - x0, y1 - y0)
+    inside = _MplPath(hull).contains_points(cells, radius=1e-9 * span) | \
+        _MplPath(hull[::-1]).contains_points(cells, radius=1e-9 * span)
+
+    src = pts
+    query = cells[inside]
+    src_index = np.arange(len(pts))
+    tol = 1e-12 * span
+    steps = _polar_grid_steps(pts[:, 0], pts[:, 1]) if polar else None
+    if steps is not None:
+        dr, dth = steps
+        src = _to_polar_units(pts, dr, dth)
+        query = _to_polar_units(query, dr, dth)
+        # the angle wraps at +-180 deg: add copies of the points shifted
+        # by one full turn so cells near the seam of a full-circle scan
+        # find their neighbours on the other side
+        turn = 2.0 * np.pi / dth
+        src = np.vstack([src, src + [0.0, turn], src - [0.0, turn]])
+        src_index = np.concatenate([src_index] * 3)
+        tol = 1e-9
+
+    k = max(1, min(int(k), len(pts)))
+    dist, idx = cKDTree(src).query(query, k=k)
+    if k == 1:
+        dist, idx = dist[:, None], idx[:, None]
+    idx = src_index[idx]
+    # exact hits: give the coinciding point all the weight
+    exact = dist <= tol
+    with np.errstate(divide='ignore'):
+        weights = np.where(exact, 0.0, 1.0 / dist ** power)
+    hit = exact.any(axis=1)
+    weights[hit] = exact[hit].astype(float)
+
+    grids = []
+    for v in values:
+        vals = np.asarray(v, dtype=float)[ok][idx]      # (cells, k)
+        finite = np.isfinite(vals)
+        w = np.where(finite, weights, 0.0)
+        wsum = w.sum(axis=1)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            est = (np.where(finite, vals, 0.0) * w).sum(axis=1) / wsum
+        # blank where the nearest point is filtered out, or no finite
+        # neighbour carries any weight
+        est[~finite[:, 0] | ~(wsum > 0)] = np.nan
+        g = np.full(len(cells), np.nan)
+        g[inside] = est
+        grids.append(g.reshape(n, n))
+    return (x0, x1, y0, y1), grids
+
+
+def _data_range(values: np.ndarray, pad_frac: float = 0.0
+                ) -> Optional[Tuple[float, float]]:
+    finite = values[np.isfinite(values)] if values.size else values
+    if finite.size == 0:
+        return None
+    lo, hi = float(finite.min()), float(finite.max())
+    pad = (hi - lo) * pad_frac if hi > lo else 1.0
+    return lo - pad, hi + pad
+
+
+def _power_of_ten(lo: float, hi: float) -> int:
+    """Exponent ``N`` such that ``max(|lo|, |hi|) / 10**N`` lies in
+    [1, 10) -- ``0`` if both are zero or not finite."""
+    m = max(abs(lo), abs(hi))
+    if not np.isfinite(m) or m == 0:
+        return 0
+    return int(np.floor(np.log10(m)))
+
+
+def _apply_power_of_ten(cb, lo: float, hi: float, name: str,
+                        unit: str) -> str:
+    """
+    Label the ticks of colorbar ``cb`` (range ``lo`` .. ``hi``) as
+    ``value / 10**N`` in ``%4.1f`` format, with the factor moved into
+    the axis label instead of matplotlib's separate offset text, e.g.
+    ``"Beta (10⁻⁵ m⁻¹ sr⁻¹)"``. Only the tick *labels* are scaled; the
+    colour mapping and the data are untouched.
+
+    :returns: the label to set on the colorbar.
+    """
+    from matplotlib.ticker import FuncFormatter, MaxNLocator
+    n = _power_of_ten(lo, hi)
+    scale = 10.0 ** n
+    cb.locator = MaxNLocator(nbins=6)
+    cb.formatter = FuncFormatter(lambda v, _pos: f'{v / scale:4.1f}')
+    cb.update_ticks()
+    if n == 0:
+        return f'{name} ({unit})'
+    return f'{name} ($10^{{{n}}}$ {unit})'
+
+
+def _plot_scan_pair(ax_vel, ax_beta, cax_vel, cax_beta,
+                    h: np.ndarray, v: np.ndarray,
+                    velocity: np.ndarray, beta: np.ndarray, *,
+                    xlim: Tuple[float, float], ylim: Tuple[float, float],
+                    speed_vlim: Optional[Tuple[float, float]],
+                    fill: bool, equal_aspect: bool,
+                    xlabel: str, ylabel: str,
+                    title: Optional[str], marker_size: float) -> None:
+    """Shared drawing code of :func:`plot_rhi` and :func:`plot_ppi`:
+    ``h``/``v`` are the points' horizontal/vertical plot coordinates."""
+    for ax in (ax_vel, ax_beta, cax_vel, cax_beta):
+        ax.cla()
+
+    h = np.asarray(h, dtype=float)
+    v = np.asarray(v, dtype=float)
+    velocity = np.asarray(velocity, dtype=float)
+    beta = np.asarray(beta, dtype=float)
 
     if speed_vlim is not None:
         vmin, vmax = speed_vlim
     else:
         vmax = _auto_speed_max(np.abs(velocity), pad=1.0)
         vmin = -vmax
-
-    sc_vel = ax_vel.scatter(distance, height, c=velocity, cmap=VELOCITY_CMAP,
-                             vmin=vmin, vmax=vmax, s=marker_size,
-                             linewidths=0)
-    fig = ax_vel.figure
-    fig.colorbar(sc_vel, cax=cax_vel, label='Radial velocity (m/s)')
-    ax_vel.set_ylabel('Height (m)')
-    ax_vel.tick_params(axis='x', labelbottom=False)
-    ax_vel.grid(True, alpha=0.3)
-
     bmin, bmax = _auto_vlim(beta)
-    sc_beta = ax_beta.scatter(distance, height, c=beta, cmap=BETA_CMAP,
-                               vmin=bmin, vmax=bmax, s=marker_size,
-                               linewidths=0)
-    fig.colorbar(sc_beta, cax=cax_beta, label='Beta (m⁻¹ sr⁻¹)')
-    ax_beta.set_ylabel('Height (m)')
-    ax_beta.set_xlabel('Distance (m)')
-    ax_beta.grid(True, alpha=0.3)
 
-    if distance_xlim is not None:
-        ax_vel.set_xlim(*distance_xlim)
-    elif distance.size:
-        ax_vel.set_xlim(float(np.nanmin(distance)), float(np.nanmax(distance)))
+    filled = None
+    if fill:
+        try:
+            filled = _idw_fill(h, v, [velocity, beta], xlim, ylim)
+        except ImportError:
+            warnings.warn('fill needs scipy (not installed) -- drawing '
+                          'the data points instead', stacklevel=3)
 
-    if height_ylim is not None:
-        ax_vel.set_ylim(*height_ylim)
-    elif height.size:
-        ax_vel.set_ylim(float(np.nanmin(height)), float(np.nanmax(height)))
+    fig = ax_vel.figure
+    panels = (
+        (ax_vel, cax_vel, velocity, VELOCITY_CMAP, vmin, vmax,
+         'Radial velocity (m/s)'),
+        (ax_beta, cax_beta, beta, BETA_CMAP, bmin, bmax,
+         'Beta (m⁻¹ sr⁻¹)'),
+    )
+    for k, (ax, cax, values, cmap, lo, hi, label) in enumerate(panels):
+        if filled is not None:
+            extent, grids = filled
+            artist = ax.imshow(grids[k], extent=extent, origin='lower',
+                               cmap=cmap, vmin=lo, vmax=hi,
+                               interpolation='nearest', aspect='auto')
+        else:
+            artist = ax.scatter(h, v, c=values, cmap=cmap, vmin=lo,
+                                vmax=hi, s=marker_size, linewidths=0)
+        cb = fig.colorbar(artist, cax=cax, orientation='horizontal')
+        if k == 1:
+            # beta: tick values like 0.000012 would crowd the bar, so
+            # show them as %4.1f and move the power of ten into the label
+            label = _apply_power_of_ten(cb, lo, hi, 'Beta', 'm⁻¹ sr⁻¹')
+        cb.set_label(label)
+        # ticks and label above the bar, away from the panel
+        cax.xaxis.set_ticks_position('top')
+        cax.xaxis.set_label_position('top')
+        ax.set_xlabel(xlabel)
+        ax.grid(True, alpha=0.3)
+    ax_vel.set_ylabel(ylabel)
+    ax_beta.tick_params(axis='y', labelleft=False)
+
+    ax_vel.set_xlim(*xlim)
+    ax_vel.set_ylim(*ylim)
+    for ax in (ax_vel, ax_beta):
+        ax.set_aspect('equal' if equal_aspect else 'auto', adjustable='box')
 
     if title:
-        ax_vel.figure.suptitle(title)
+        fig.suptitle(title)
+
+
+def scan_view_title(kind: str, view: str) -> str:
+    """Title prefix for an RHI/PPI view of a ``kind`` file: just the
+    kind when they coincide (an RHI file shown as RHI), else
+    ``"<kind> (<VIEW>)"``, e.g. ``"VAD (PPI)"``."""
+    view = view.upper()
+    return kind if kind.upper() == view else f'{kind} ({view})'
+
+
+def _azimuth_label(azimuth: Optional[float]) -> str:
+    return '' if azimuth is None else f' → {azimuth % 360:.1f}°'
+
+
+def plot_rhi(
+        ax_vel, ax_beta, cax_vel, cax_beta,
+        x: np.ndarray, z: np.ndarray,
+        velocity: np.ndarray, beta: np.ndarray,
+        *,
+        distance_xlim: Optional[Tuple[float, float]] = None,
+        height_ylim: Optional[Tuple[float, float]] = None,
+        speed_vlim: Optional[Tuple[float, float]] = None,
+        fill: bool = False,
+        azimuth0: Optional[float] = None,
+        title: Optional[str] = None,
+        marker_size: float = 6.0) -> None:
+    """
+    Draw one scan projected onto the vertical x/z plane (RHI view) into
+    an existing set of axes created by :func:`create_scan_pair_figure`:
+    radial velocity left, beta right, every point placed at its own
+    ``(x, z)`` -- ``x`` horizontal along the scan's first-ray azimuth
+    (negative for rays pointing more than 90 degrees away from it),
+    ``z`` height (see :class:`haloviewer.data.ScanPointsData`). Clears
+    and redraws in place.
+
+    :param ax_vel: left axes (radial velocity).
+    :param ax_beta: right axes (beta), sharing x/y with ``ax_vel``.
+    :param cax_vel: colorbar axes for the velocity panel.
+    :param cax_beta: colorbar axes for the beta panel.
+    :param x: 1-D array of horizontal distance along the first-ray \
+        azimuth (m), one per point.
+    :param z: 1-D array of height (m), same shape as ``x``.
+    :param velocity: 1-D array of radial (Doppler) velocity (m/s).
+    :param beta: 1-D array of attenuated backscatter.
+    :param distance_xlim: fixed ``(min, max)`` for the shared distance \
+        (x) axis; if ``None``, chosen from the data.
+    :param height_ylim: fixed ``(min, max)`` for the shared height \
+        (z) axis; if ``None``, chosen from the data.
+    :param speed_vlim: fixed ``(min, max)`` colour range for radial \
+        velocity; if ``None``, a symmetric range from the data's \
+        magnitude, capped like :data:`MAX_AUTOSCALE_SPEED`. Beta \
+        always autoscales from its own data (see :func:`_auto_vlim`).
+    :param fill: if ``True``, fill the area between the points by \
+        inverse-distance-weighted interpolation (see :func:`_idw_fill`) \
+        instead of drawing individual points.
+    :param azimuth0: azimuth (degrees) the x axis points to, shown in \
+        the axis label.
+    :param title: optional figure title.
+    :param marker_size: scatter marker size (points²) when not filled.
+    """
+    x = np.asarray(x, dtype=float)
+    z = np.asarray(z, dtype=float)
+    xlim = distance_xlim or _data_range(x) or (0.0, 1.0)
+    ylim = height_ylim or _data_range(z) or (0.0, 1.0)
+    _plot_scan_pair(ax_vel, ax_beta, cax_vel, cax_beta, x, z,
+                    velocity, beta, xlim=xlim, ylim=ylim,
+                    speed_vlim=speed_vlim, fill=fill, equal_aspect=False,
+                    xlabel=f'Distance{_azimuth_label(azimuth0)} (m)',
+                    ylabel='Height (m)', title=title,
+                    marker_size=marker_size)
+
+
+def plot_ppi(
+        ax_vel, ax_beta, cax_vel, cax_beta,
+        x: np.ndarray, y: np.ndarray,
+        velocity: np.ndarray, beta: np.ndarray,
+        *,
+        distance_max: Optional[float] = None,
+        speed_vlim: Optional[Tuple[float, float]] = None,
+        fill: bool = False,
+        azimuth0: Optional[float] = None,
+        title: Optional[str] = None,
+        marker_size: float = 6.0) -> None:
+    """
+    Draw one scan projected onto the horizontal x/y plane (PPI view)
+    into an existing set of axes created by
+    :func:`create_scan_pair_figure`: radial velocity left, beta right,
+    on square (equal-aspect) panels. ``x`` points along the scan's
+    first-ray azimuth, ``y`` 90 degrees counter-clockwise from it (see
+    :class:`haloviewer.data.ScanPointsData`), so the picture is a map
+    view rotated to put ``azimuth0`` on the right. Clears and redraws in
+    place.
+
+    :param ax_vel: left axes (radial velocity).
+    :param ax_beta: right axes (beta), sharing x/y with ``ax_vel``.
+    :param cax_vel: colorbar axes for the velocity panel.
+    :param cax_beta: colorbar axes for the beta panel.
+    :param x: 1-D array of the points' x coordinate (m).
+    :param y: 1-D array of the points' y coordinate (m).
+    :param velocity: 1-D array of radial (Doppler) velocity (m/s).
+    :param beta: 1-D array of attenuated backscatter.
+    :param distance_max: both axes show ``[-distance_max, \
+        +distance_max]``; if ``None``, the largest ``|x|``/``|y|`` of \
+        the data.
+    :param speed_vlim: see :func:`plot_rhi`.
+    :param fill: see :func:`plot_rhi`.
+    :param azimuth0: azimuth (degrees) the x axis points to, shown in \
+        the axis labels.
+    :param title: optional figure title.
+    :param marker_size: scatter marker size (points²) when not filled.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if distance_max is None or not distance_max > 0:
+        finite = np.abs(np.concatenate([x, y]))
+        finite = finite[np.isfinite(finite)]
+        distance_max = float(finite.max()) if finite.size else 1.0
+        distance_max = distance_max or 1.0
+    lim = (-float(distance_max), float(distance_max))
+    y_az = None if azimuth0 is None else azimuth0 - 90.0
+    _plot_scan_pair(ax_vel, ax_beta, cax_vel, cax_beta, x, y,
+                    velocity, beta, xlim=lim, ylim=lim,
+                    speed_vlim=speed_vlim, fill=fill, equal_aspect=True,
+                    xlabel=f'x{_azimuth_label(azimuth0)} (m)',
+                    ylabel=f'y{_azimuth_label(y_az)} (m)', title=title,
+                    marker_size=marker_size)

@@ -19,6 +19,7 @@ from typing import Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from . import cache as _cache
 from . import hpl
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ __all__ = [
     'ProfileData', 'ProfileSeriesData',
     'load_profile', 'load_profile_series',
     'ScanHistoryData', 'load_scan_history',
-    'RhiCrossSectionData', 'load_rhi_cross_section',
+    'ScanPointsData', 'load_scan_points',
 ]
 
 
@@ -105,6 +106,16 @@ def _mask_below(values: np.ndarray, intensity: np.ndarray,
     return out
 
 
+def _f32_threshold(intensity_min: Optional[float]) -> Optional[float]:
+    """The filter threshold for intensities held as ``float32`` (see
+    :class:`haloviewer.hpl.ScanArrays`), rounded the same way, so that
+    a value exactly equal to the threshold in the file (e.g. ``1.050000``
+    with a threshold of 1.05) still counts as "not below" it."""
+    if intensity_min is None:
+        return None
+    return float(np.float32(intensity_min))
+
+
 @dataclass
 class ProfileData:
     """One "Processed Wind Profile" snapshot: height, speed and
@@ -167,28 +178,19 @@ def load_wind_profile_intensity(path, n_levels: int) -> np.ndarray:
     :returns: array of length ``n_levels``.
     :raises ValueError: if the file contains no usable ray data.
     """
-    f = hpl.DataFile(str(path))
-    if not f.rays:
+    a = _cache.read_scan_arrays(path)
+    if a.n_rays == 0 or a.n_gates == 0:
         raise ValueError(f'{path} contains no scan (ray) data')
 
-    per_ray: List[np.ndarray] = []
-    n_gates = 0
-    for r in f.rays:
-        ng = len(r.data.index)
-        if ng == 0:
-            continue
-        inten = pd.to_numeric(r.data['Intensity'], errors='coerce').to_numpy()
-        if 'Range Gate' in r.data.columns:
-            gate = pd.to_numeric(r.data['Range Gate'],
-                                 errors='coerce').to_numpy()
-        else:
-            gate = np.arange(ng, dtype=float)
-        ok = np.isfinite(gate) & (gate >= 0) & (gate < n_levels)
-        row = np.full(n_levels, np.nan)
-        row[gate[ok].astype(int)] = inten[ok]
-        per_ray.append(row)
-        n_gates = max(n_gates, int(np.nanmax(gate)) + 1
-                      if np.isfinite(gate).any() else ng)
+    gate = a.gate.astype(float)
+    inten = a.intensity.astype(float)
+    ok = np.isfinite(gate) & (gate >= 0) & (gate < n_levels)
+    rows = np.full((a.n_rays, n_levels), np.nan)
+    ray_idx = np.nonzero(ok)[0]
+    rows[ray_idx, gate[ok].astype(int)] = inten[ok]
+    per_ray = list(rows)
+    finite = np.isfinite(gate)
+    n_gates = (int(np.nanmax(gate)) + 1 if finite.any() else a.n_gates)
     if not per_ray:
         raise ValueError(f'{path} contains no usable intensity data')
     if n_gates != n_levels:
@@ -393,25 +395,111 @@ def load_profile_series(paths: Iterable,
 
 # =========================================================================
 # Regular scan files (VAD, Stare, RHI, Wind_Profile): raw intensity/beta
-# "history", and RHI's own distance/height cross section.
+# "history", and a single scan's points in 3-D for the RHI/PPI views.
 # =========================================================================
 
 
-def _gate_distance_axis(gate_length: float, n_gates: int) -> np.ndarray:
-    """Range-gate-center distance (m) along the beam for ``n_gates``
-    gates of ``gate_length`` metres each -- gate 0's center sits half a
-    gate length out, matching the "Range of measurement (center of
-    gate)" convention noted in the ``.hpl`` header."""
-    return (np.arange(n_gates) + 0.5) * gate_length
+def _gate_range(gate_index, gate_length: float,
+                gate_points: float = 1.0) -> np.ndarray:
+    """
+    Along-beam range (m) of the centre of range gate(s) ``gate_index``,
+    following the Halo convention stated in the ``.hpl`` header::
+
+        range = gate_length / 2 + gate_index * gate_length / gate_points
+
+    with ``gate_length`` the ``Range gate length (m)`` and
+    ``gate_points`` the ``Gate length (pts)`` header value. Gates are
+    ``gate_length / gate_points`` metres apart, i.e. neighbouring gates
+    overlap when ``gate_points > 1``; gate 0's centre sits half a gate
+    length out.
+    """
+    if not gate_points or gate_points <= 0:
+        gate_points = 1.0
+    idx = np.asarray(gate_index, dtype=float)
+    return gate_length / 2.0 + idx * (gate_length / gate_points)
 
 
-def _tilt_corrected_unit_components(
+def _gate_distance_axis(gate_length: float, n_gates: int,
+                        gate_points: float = 1.0) -> np.ndarray:
+    """Range-gate-centre distance (m) of gates ``0 .. n_gates - 1``; see
+    :func:`_gate_range` for the formula."""
+    return _gate_range(np.arange(n_gates), gate_length, gate_points)
+
+
+def _header_gate_geometry(header) -> Tuple[Optional[float], float]:
+    """``(gate_length_m, gate_points)`` from a parsed header:
+    ``Range gate length (m)`` (``None`` if missing) and
+    ``Gate length (pts)`` (``1`` if missing or unusable, i.e. gates
+    spaced one full gate length apart)."""
+    if not header:
+        return None, 1.0
+    gate_length = None
+    try:
+        gate_length = float(header.get('gatelength')) or None
+    except (TypeError, ValueError):
+        pass
+    try:
+        gate_points = float(header.get('gatepoints'))
+        if not gate_points > 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        gate_points = 1.0
+    return gate_length, gate_points
+
+
+def _ray_gate_index(ray) -> np.ndarray:
+    """Gate indices of one ray's rows: its ``Range Gate`` column where
+    present and usable, else ``0 .. n - 1``."""
+    n = len(ray.data.index)
+    if 'Range Gate' in ray.data.columns:
+        idx = pd.to_numeric(ray.data['Range Gate'], errors='coerce').to_numpy()
+        if np.isfinite(idx).all():
+            return idx.astype(float)
+    return np.arange(n, dtype=float)
+
+
+def _gate_index_array(gate: np.ndarray) -> np.ndarray:
+    """Per-ray gate indices for a ``(n_rays, n_gates)`` ``Range Gate``
+    array: a ray's own values where all of them are usable, else
+    ``0 .. n_gates - 1`` (as :func:`_ray_gate_index` does per ray)."""
+    gate = np.asarray(gate, dtype=float)
+    out = np.broadcast_to(np.arange(gate.shape[1], dtype=float),
+                          gate.shape).copy()
+    good = np.isfinite(gate).all(axis=1)
+    out[good] = gate[good]
+    return out
+
+
+def _tilt_corrected_unit_vectors(azimuth, elevation, pitch, roll
+                                 ) -> Tuple[np.ndarray, np.ndarray,
+                                            np.ndarray]:
+    """Array version of :func:`_tilt_corrected_unit_vector` (one
+    ``(east, north, up)`` triple per ray); ``nan`` angles count as 0,
+    as ``None`` does there."""
+    def rad(v):
+        v = np.asarray(v, dtype=float)
+        return np.deg2rad(np.where(np.isfinite(v), v, 0.0))
+    az, el, p, r = rad(azimuth), rad(elevation), rad(pitch), rad(roll)
+    x0 = np.cos(el) * np.sin(az)
+    y0 = np.cos(el) * np.cos(az)
+    z0 = np.sin(el)
+    x1 = x0
+    y1 = y0 * np.cos(p) - z0 * np.sin(p)
+    z1 = y0 * np.sin(p) + z0 * np.cos(p)
+    x2 = x1 * np.cos(r) + z1 * np.sin(r)
+    y2 = y1
+    z2 = -x1 * np.sin(r) + z1 * np.cos(r)
+    return x2, y2, z2
+
+
+def _tilt_corrected_unit_vector(
         azimuth: float, elevation: float,
-        pitch: Optional[float], roll: Optional[float]) -> Tuple[float, float]:
+        pitch: Optional[float], roll: Optional[float]
+        ) -> Tuple[float, float, float]:
     """
     Convert one ray's nominal (azimuth, elevation) pointing direction
     plus the instrument's own (pitch, roll) tilt into a true, level-
-    frame unit pointing vector's horizontal and vertical components.
+    frame unit pointing vector ``(east, north, up)``.
 
     ``azimuth``/``elevation`` are the ray's recorded angles (elevation
     up from the horizon, azimuth clockwise from north); ``pitch``/
@@ -427,10 +515,9 @@ def _tilt_corrected_unit_components(
     even though these particular pitch/roll values are typically well
     under a degree.
 
-    :returns: ``(horizontal, vertical)`` components of the corrected \
-        unit vector (``horizontal**2 + vertical**2 == 1``); multiply \
-        each by the along-beam range to get horizontal distance and \
-        height.
+    :returns: ``(east, north, up)`` components of the corrected unit \
+        vector; multiply by the along-beam range to get the point's \
+        position relative to the instrument.
     """
     az = np.deg2rad(float(azimuth))
     el = np.deg2rad(float(elevation))
@@ -452,9 +539,22 @@ def _tilt_corrected_unit_components(
     y2 = y1
     z2 = -x1 * np.sin(r) + z1 * np.cos(r)
 
-    horizontal = float(np.hypot(x2, y2))
-    vertical = float(z2)
-    return horizontal, vertical
+    return float(x2), float(y2), float(z2)
+
+
+def _tilt_corrected_unit_components(
+        azimuth: float, elevation: float,
+        pitch: Optional[float], roll: Optional[float]) -> Tuple[float, float]:
+    """
+    Horizontal and vertical components of
+    :func:`_tilt_corrected_unit_vector`.
+
+    :returns: ``(horizontal, vertical)`` components of the corrected \
+        unit vector (``horizontal**2 + vertical**2 == 1``).
+    """
+    east, north, up = _tilt_corrected_unit_vector(
+        azimuth, elevation, pitch, roll)
+    return float(np.hypot(east, north)), float(up)
 
 
 @dataclass
@@ -518,14 +618,15 @@ def load_scan_history(paths: Iterable,
     azimuths/elevations, and a time range spans many files); instead
     every ray's per-gate intensity/beta is averaged into "round" time
     bins (:func:`_pick_history_bin_seconds`) against a distance axis
-    taken directly from the range gates (gate index and the first
-    file's ``Range gate length (m)`` -- see :func:`_gate_distance_axis`).
+    taken directly from the range gates (gate index, and the first
+    file's ``Range gate length (m)`` and ``Gate length (pts)`` -- see
+    :func:`_gate_range`).
     A bin with no ray falling into it is left as ``nan``; the plotting
     layer then leaves the corresponding pixels empty (background)
     rather than interpolating across the gap.
 
     A file that fails to load (corrupt, truncated beyond what
-    :meth:`hpl.DataFile._get_datablock`'s own truncation handling can
+    :func:`hpl.read_scan_arrays`'s own truncation handling can
     recover, or not actually a regular scan file) is skipped with a
     logged warning rather than aborting the whole history, so one bad
     file among many doesn't blank the whole plot.
@@ -538,55 +639,66 @@ def load_scan_history(paths: Iterable,
     :raises ValueError: if none of the files could be loaded, or none \
         of the ones that did contain any ray data.
     """
-    files = []
+    scans = []
     for p in paths:
         try:
-            files.append(hpl.DataFile(str(p)))
+            scans.append(_cache.read_scan_arrays(p))
         except (IOError, ValueError) as exc:
             logger.warning('skipping %s: %s', p, exc)
-    files = [f for f in files if f.rays]
-    if not files:
+    scans = [a for a in scans if a.n_rays and a.n_gates]
+    if not scans:
         raise ValueError('no scan (ray) data found in the given files')
 
-    gate_length = 1.0
-    for f in files:
-        gl = f.header.get('gatelength') if f.header else None
+    gate_length, gate_points = 1.0, 1.0
+    for a in scans:
+        gl, gp = _header_gate_geometry(a.header)
         if gl:
-            gate_length = float(gl)
+            gate_length, gate_points = gl, gp
             break
-    n_gates = max((len(r.data.index) for f in files for r in f.rays),
-                  default=0)
-    distance = _gate_distance_axis(gate_length, n_gates)
+    n_gates = max(a.n_gates for a in scans)
+    distance = _gate_distance_axis(gate_length, n_gates, gate_points)
 
-    ray_times = pd.DatetimeIndex([r.time for f in files for r in f.rays])
-    t0 = ray_times.min()
-    span = (ray_times.max() - t0).total_seconds()
+    all_times = np.concatenate([a.time for a in scans])
+    all_times = all_times[~np.isnat(all_times)]
+    if not all_times.size:
+        raise ValueError('no scan (ray) data found in the given files')
+    t0 = pd.Timestamp(all_times.min())
+    span = (pd.Timestamp(all_times.max()) - t0).total_seconds()
     bin_s = _pick_history_bin_seconds(span)
     n_bins = max(1, int(span // bin_s) + 1)
 
-    sum_i = np.zeros((n_gates, n_bins))
-    cnt_i = np.zeros((n_gates, n_bins))
-    sum_b = np.zeros((n_gates, n_bins))
-    cnt_b = np.zeros((n_gates, n_bins))
+    # accumulated as (bin, gate) and transposed at the end
+    sum_i = np.zeros((n_bins, n_gates))
+    cnt_i = np.zeros((n_bins, n_gates))
+    sum_b = np.zeros((n_bins, n_gates))
+    cnt_b = np.zeros((n_bins, n_gates))
 
-    for f in files:
-        for r in f.rays:
-            ng = len(r.data.index)
-            if ng == 0:
-                continue
-            j = int((r.time - t0).total_seconds() // bin_s)
-            j = min(max(j, 0), n_bins - 1)
-            inten = pd.to_numeric(r.data['Intensity'], errors='coerce').to_numpy()
-            beta = pd.to_numeric(r.data['Beta'], errors='coerce').to_numpy()
-            if intensity_min is not None:
-                beta = _mask_below(beta, inten, intensity_min)
-                inten = _mask_below(inten, inten, intensity_min)
-            ok_i = np.isfinite(inten)
-            sum_i[:ng, j] += np.where(ok_i, inten, 0.0)
-            cnt_i[:ng, j] += ok_i
-            ok_b = np.isfinite(beta)
-            sum_b[:ng, j] += np.where(ok_b, beta, 0.0)
-            cnt_b[:ng, j] += ok_b
+    t0_ns = t0.to_datetime64().astype('datetime64[ns]')
+    for a in scans:
+        valid = ~np.isnat(a.time)
+        if not valid.any():
+            continue
+        ng = a.n_gates
+        secs = (a.time[valid] - t0_ns).astype('int64') / 1e9
+        j = np.clip((secs // bin_s).astype(int), 0, n_bins - 1)
+        inten = a.intensity[valid].astype(float)
+        beta = a.beta[valid].astype(float)
+        if intensity_min is not None:
+            thr = _f32_threshold(intensity_min)
+            beta = _mask_below(beta, inten, thr)
+            inten = _mask_below(inten, inten, thr)
+        ok_i = np.isfinite(inten)
+        ok_b = np.isfinite(beta)
+        # sum all rays of the same bin at once (much faster than
+        # np.add.at): sort by bin, then reduce each run of equal bins
+        order = np.argsort(j, kind='stable')
+        bins, starts = np.unique(j[order], return_index=True)
+        for acc, vals in ((sum_i, np.where(ok_i, inten, 0.0)),
+                          (cnt_i, ok_i.astype(float)),
+                          (sum_b, np.where(ok_b, beta, 0.0)),
+                          (cnt_b, ok_b.astype(float))):
+            acc[bins, :ng] += np.add.reduceat(vals[order], starts, axis=0)
+    sum_i, cnt_i, sum_b, cnt_b = sum_i.T, cnt_i.T, sum_b.T, cnt_b.T
 
     with np.errstate(invalid='ignore'):
         intensity = np.where(cnt_i > 0, sum_i / np.where(cnt_i > 0, cnt_i, 1),
@@ -601,34 +713,57 @@ def load_scan_history(paths: Iterable,
 
 
 @dataclass
-class RhiCrossSectionData:
-    """One RHI scan's vertical cross section: every (gate, ray) point's
-    horizontal distance and height (from
-    :func:`_tilt_corrected_unit_components`, using that ray's own
-    azimuth/elevation/pitch/roll), paired with its radial velocity
-    (Doppler) and backscatter (beta). Points from different rays don't
-    share a common distance/height grid the way a fixed-geometry scan
-    would, so this is plotted as individual points, not gridded."""
+class ScanPointsData:
+    """One regular scan's (gate, ray) points in a level, instrument-
+    centred Cartesian frame, rotated so that its horizontal axes follow
+    the scan's own first ray, paired with each point's radial velocity
+    (Doppler) and backscatter (beta). This is what the RHI and PPI
+    views project from: RHI shows ``(x, z)``, PPI shows ``(x, y)``.
+
+    The frame:
+
+    * ``x`` -- horizontal, pointing along :attr:`azimuth0`, the
+      (recorded) azimuth of the scan's first ray. A point on a ray
+      whose azimuth is more than 90 degrees away from :attr:`azimuth0`
+      (e.g. the far side of an over-the-top RHI, or the back half of a
+      VAD cone) therefore has a *negative* ``x``.
+    * ``y`` -- horizontal, 90 degrees counter-clockwise from ``x``
+      seen from above (i.e. towards azimuth ``azimuth0 - 90``), so
+      ``(x, y, z)`` is right-handed and a PPI plot is an ordinary
+      map view rotated so that ``azimuth0`` points to the right.
+    * ``z`` -- height above the instrument.
+
+    Each ray's own azimuth, elevation, pitch and roll give its pointing
+    vector (:func:`_tilt_corrected_unit_vector`); points from different
+    rays don't share a common grid, so this is plotted as individual
+    points (or, optionally, inverse-distance-weighted filled -- see
+    :mod:`haloviewer.plotting`), not gridded.
+    """
     timestamp: pd.Timestamp
-    distance: np.ndarray
-    height: np.ndarray
+    x: np.ndarray
+    y: np.ndarray
+    z: np.ndarray
     velocity: np.ndarray
     beta: np.ndarray
     path: Path
+    #: azimuth (degrees, clockwise from north) the ``x`` axis points to
+    azimuth0: float = 0.0
     #: intensity (SNR + 1) of every point, unfiltered
     intensity: Optional[np.ndarray] = None
 
 
-def load_rhi_cross_section(path, intensity_min: Optional[float] = None
-                           ) -> RhiCrossSectionData:
+def load_scan_points(path, intensity_min: Optional[float] = None
+                     ) -> ScanPointsData:
     """
-    Load a single RHI scan file and compute its distance/height cross
-    section: horizontal distance and height for every range gate of
-    every ray, from that ray's own azimuth, elevation, pitch and roll
-    (:func:`_tilt_corrected_unit_components`), paired with that gate's
-    radial velocity (Doppler) and backscatter (beta).
+    Load a single regular scan file (VAD, Stare, RHI or Wind_Profile)
+    and compute every (gate, ray) point's position in the frame
+    described in :class:`ScanPointsData`: from that ray's own azimuth,
+    elevation, pitch and roll (:func:`_tilt_corrected_unit_vector`)
+    and the gate's centre range (:func:`_gate_range`), rotated
+    so that ``x`` points along the first ray's azimuth. Each point is
+    paired with its radial velocity (Doppler) and backscatter (beta).
 
-    :param path: path to an ``RHI_*.hpl`` file.
+    :param path: path to a regular scan ``.hpl`` file.
     :param intensity_min: optional intensity filter threshold: \
         velocity and beta of points whose intensity is below it are \
         set to ``nan`` (the points keep their position, so the arrays \
@@ -636,42 +771,39 @@ def load_rhi_cross_section(path, intensity_min: Optional[float] = None
     :raises ValueError: if the file contains no ray (scan) data.
     """
     path = Path(path)
-    f = hpl.DataFile(str(path))
-    if not f.rays:
+    a = _cache.read_scan_arrays(path)
+    if a.n_rays == 0 or a.n_gates == 0:
         raise ValueError(f'{path} contains no scan (ray) data')
-    gate_length = float(f.header.get('gatelength') or 1.0) if f.header else 1.0
+    gate_length, gate_points = _header_gate_geometry(a.header)
+    gate_length = gate_length or 1.0
 
-    distances: List[np.ndarray] = []
-    heights: List[np.ndarray] = []
-    velocities: List[np.ndarray] = []
-    betas: List[np.ndarray] = []
-    intensities: List[np.ndarray] = []
-    for r in f.rays:
-        ng = len(r.data.index)
-        if ng == 0:
-            continue
-        gate_range = _gate_distance_axis(gate_length, ng)
-        horiz, vert = _tilt_corrected_unit_components(
-            r.azimuth, r.elevation, r.pitch, r.roll)
-        distances.append(gate_range * horiz)
-        heights.append(gate_range * vert)
-        velocities.append(
-            pd.to_numeric(r.data['Doppler'], errors='coerce').to_numpy())
-        betas.append(
-            pd.to_numeric(r.data['Beta'], errors='coerce').to_numpy())
-        intensities.append(
-            pd.to_numeric(r.data['Intensity'], errors='coerce').to_numpy())
+    azimuth0 = (float(a.azimuth[0]) if np.isfinite(a.azimuth[0])
+                else 0.0)
+    a0 = np.deg2rad(azimuth0)
+    # unit vectors of the x (towards azimuth0) and y (towards
+    # azimuth0 - 90) axes in east/north components
+    ex = (np.sin(a0), np.cos(a0))
+    ey = (-np.cos(a0), np.sin(a0))
 
-    def _cat(parts: List[np.ndarray]) -> np.ndarray:
-        return np.concatenate(parts).astype(float) if parts else np.array([])
+    # (n_rays, n_gates) ranges, (n_rays, 1) pointing vectors; flattened
+    # ray by ray, gate by gate
+    gate_range = _gate_range(_gate_index_array(a.gate), gate_length,
+                             gate_points)
+    east, north, up = (v[:, None] for v in _tilt_corrected_unit_vectors(
+        a.azimuth, a.elevation, a.pitch, a.roll))
+    x = (gate_range * (east * ex[0] + north * ex[1])).ravel()
+    y = (gate_range * (east * ey[0] + north * ey[1])).ravel()
+    z = (gate_range * up).ravel()
 
-    intensity = _cat(intensities)
-    return RhiCrossSectionData(
-        timestamp=f.timestamp,
-        distance=_cat(distances),
-        height=_cat(heights),
-        velocity=_mask_below(_cat(velocities), intensity, intensity_min),
-        beta=_mask_below(_cat(betas), intensity, intensity_min),
+    intensity = a.intensity.astype(float).ravel()
+    return ScanPointsData(
+        timestamp=a.timestamp,
+        x=x, y=y, z=z,
+        velocity=_mask_below(a.doppler.astype(float).ravel(), intensity,
+                             _f32_threshold(intensity_min)),
+        beta=_mask_below(a.beta.astype(float).ravel(), intensity,
+                         _f32_threshold(intensity_min)),
         path=path,
+        azimuth0=azimuth0,
         intensity=intensity,
     )

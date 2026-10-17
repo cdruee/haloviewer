@@ -24,6 +24,10 @@ Examples::
     haloplot Proc/2026/202609 --kind RHI --start 24h --time \\
         "2026-09-19 12:00" --height 0 3000 -p rhi_24h.png
 
+    # one VAD scan as a filled PPI (horizontal plane), +-2 km
+    haloplot VAD_77_20260921_000721.hpl --mode ppi --fill \\
+        --dist 0 2000 -p vad_ppi.png
+
     # hide low-signal data (intensity < 1.018, the default threshold)
     haloplot Proc/2026/202609/20260919 -k VAD --filter True -p vad.png
 
@@ -32,6 +36,10 @@ Examples::
 
     # neither -p/--plot nor --show given -> saved as "plot.png"
     haloplot some_file.hpl
+
+    # remembered settings and cache size; keep the cache in ~/.cache
+    haloplot --info
+    haloplot --user-cache
 """
 
 from __future__ import annotations
@@ -43,6 +51,7 @@ from typing import List, Optional
 
 from . import api
 from . import data as _data
+from . import settings as _settings
 
 #: Output filename used when neither -p/--plot nor --show is given.
 DEFAULT_OUTPUT = 'plot.png'
@@ -63,9 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
         prog='haloplot',
         description='Plot Halo Photonics wind lidar .hpl file(s).')
     parser.add_argument(
-        'files', nargs='+', metavar='FILE',
+        'files', nargs='*', metavar='FILE',
         help='file(s), directory/directories (searched recursively for '
-             '.hpl files), and/or glob pattern(s) to plot')
+             '.hpl files), and/or glob pattern(s) to plot. May be '
+             'omitted with -i/--info or a cache option')
     parser.add_argument(
         '-k', '--kind', metavar='KIND',
         help='file kind to select (e.g. Processed_Wind_Profile, VAD, '
@@ -73,11 +83,15 @@ def build_parser() -> argparse.ArgumentParser:
              'when FILE resolves to a single kind; required if it '
              'resolves to more than one')
     parser.add_argument(
-        '--mode', choices=['profile', 'history'], default=None,
-        help='plot type: "profile" for a single scan/profile, "history" '
-             'for a time series of several files. Defaults to "profile" '
-             'when exactly one file falls in the selected time range, '
-             'otherwise "history"')
+        '--mode', choices=['profile', 'history', 'rhi', 'ppi'],
+        default=None,
+        help='plot type: "profile" for a single processed wind profile, '
+             '"history" for a time series of several files, "rhi"/"ppi" '
+             'for a single scan projected onto the vertical/horizontal '
+             'plane (x along the first ray\'s azimuth; scan kinds only). '
+             'Defaults to "profile" (Processed_Wind_Profile) or "rhi" '
+             '(RHI) when exactly one file falls in the selected time '
+             'range, otherwise "history"')
     parser.add_argument(
         '-s', '--start', metavar='START',
         help='start of the time range: an absolute timestamp '
@@ -90,12 +104,14 @@ def build_parser() -> argparse.ArgumentParser:
              'that file\'s own timestamp, if only one file is given)')
     parser.add_argument(
         '--height', nargs=2, type=float, metavar=('MIN', 'MAX'),
-        help='fix the height/vertical axis range (deselects autoscale)')
+        help='fix the height/vertical axis range (deselects autoscale; '
+             'warns if not applicable, e.g. for ppi)')
     parser.add_argument(
         '--dist', dest='distance', nargs=2, type=float,
         metavar=('MIN', 'MAX'),
-        help='fix the distance (range) axis for RHI profile plots '
-             '(deselects autoscale; warns if not applicable)')
+        help='fix the horizontal distance axis of rhi plots; for ppi '
+             'only MAX is used (both axes span -MAX..+MAX). Deselects '
+             'autoscale; warns if not applicable')
     parser.add_argument(
         '--speed', nargs=2, type=float, metavar=('MIN', 'MAX'),
         help='fix the wind-speed/velocity axis or colour range '
@@ -107,6 +123,10 @@ def build_parser() -> argparse.ArgumentParser:
              '(%g). For Processed_Wind_Profile, the intensity comes from '
              'the Wind_Profile file with the same timestamp'
              % _data.DEFAULT_INTENSITY_FILTER)
+    parser.add_argument(
+        '--fill', action='store_true',
+        help='rhi/ppi only: fill the area between the data points by '
+             'inverse-distance-weighted interpolation instead of drawing dots')
     parser.add_argument(
         '-p', '--plot', dest='output', metavar='PATH',
         help='save the figure to PATH (format inferred from the '
@@ -121,6 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
         help='figure size in inches (default: A4 landscape, 11.69x8.27)')
     parser.add_argument(
         '--verbose', '-v', action='store_true', help='enable debug logging')
+    _settings.add_cache_arguments(parser)
     return parser
 
 
@@ -131,6 +152,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)
+
+    try:
+        message = _settings.apply_cache_arguments(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if message:
+        print(message, file=sys.stderr)
+    if args.info:
+        print(_settings.info_text())
+    if not args.files:
+        if message or args.info:
+            return 0
+        parser.error('the following arguments are required: FILE')
 
     output = args.output
     if output is None and not args.show:
@@ -156,6 +190,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         kwargs['figsize'] = tuple(args.figsize)
     if args.filter is not None:
         kwargs['filter'] = args.filter
+    if args.fill:
+        kwargs['fill'] = True
 
     try:
         with warnings.catch_warnings(record=True) as caught:

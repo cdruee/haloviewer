@@ -1,0 +1,55 @@
+Updating 9a9556a..e1cf8a7
+Fast-forward
+Squash commit -- not updating HEAD
+ .gitignore                                      |   3 +-
+ README.md                                       | 108 +---
+ docs/api.rst                                    |  34 +-
+ docs/cli.rst                                    |  83 ++-
+ docs/conf.py                                    |  75 ++-
+ docs/design.rst                                 | 151 +++++
+ docs/images/haloviewer_logo.png                 | Bin 0 -> 11629 bytes
+ docs/images/haloviewer_rhi.png                  | Bin 0 -> 386468 bytes
+ docs/index.rst                                  | 207 +++----
+ docs/sync.rst                                   |  10 +-
+ docs/viewer.rst                                 | 390 +++++++++---
+ environment.yml                                 |   5 +-
+ gitlab-ci.yml                                   | 393 ++++++++++++
+ haloviewer/api.py                               | 212 ++++---
+ haloviewer/cache.py                             | 528 ++++++++++++++++
+ haloviewer/cli.py                               |  56 +-
+ haloviewer/data.py                              | 396 ++++++++----
+ haloviewer/gui.py                               | 770 +++++++++++++++++++-----
+ haloviewer/halosync.py                          |  43 +-
+ haloviewer/hpl.py                               | 231 ++++++-
+ haloviewer/plotting.py                          | 579 +++++++++++++++---
+ haloviewer/scan.py                              |  51 +-
+ haloviewer/settings.py                          | 213 +++++++
+ logo/haloviewer_logo.png                        | Bin 0 -> 37960 bytes
+ logo/haloviewer_logo.svg                        | 246 ++++++++
+ logo/haloviewer_logo_196x196.png                | Bin 0 -> 11629 bytes
+ pyproject.toml                                  |   1 +
+ tests/conftest.py                               |  16 +
+ tests/data/RHI_77_20260921_000812.hpl           | 160 ++---
+ tests/data/VAD_77_20260921_000721.hpl           | 240 ++++----
+ tests/data/VAD_77_20260921_000721_truncated.hpl | 218 +++----
+ tests/test_cache.py                             | 258 ++++++++
+ tests/test_data_and_plotting.py                 |  54 +-
+ tests/test_filter.py                            | 252 ++++++++
+ tests/test_halosync.py                          |   3 +-
+ tests/test_rhi_ppi.py                           | 398 ++++++++++++
+ tests/test_scan.py                              |  10 +-
+ tests/test_settings.py                          | 277 +++++++++
+ 38 files changed, 5482 insertions(+), 1189 deletions(-)
+ create mode 100644 docs/design.rst
+ create mode 100644 docs/images/haloviewer_logo.png
+ create mode 100644 docs/images/haloviewer_rhi.png
+ create mode 100644 gitlab-ci.yml
+ create mode 100644 haloviewer/cache.py
+ create mode 100644 haloviewer/settings.py
+ create mode 100644 logo/haloviewer_logo.png
+ create mode 100644 logo/haloviewer_logo.svg
+ create mode 100644 logo/haloviewer_logo_196x196.png
+ create mode 100644 tests/test_cache.py
+ create mode 100644 tests/test_filter.py
+ create mode 100644 tests/test_rhi_ppi.py
+ create mode 100644 tests/test_settings.py

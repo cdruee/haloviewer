@@ -1,5 +1,7 @@
 # HaloViewer
 
+<img src="docs/images/haloviewer_logo.png" alt="HaloViewer logo" width="128">
+
 A viewer and plotting toolkit for Halo Photonics wind lidar data
 (`.hpl` files) covering the **processed-product** tree
 (`Proc/YYYY/YYYYMM/YYYYMMDD/*.hpl`). Every kind found there is
@@ -8,12 +10,17 @@ single scan's height/speed/direction profile, or many combined into a
 height/time History image), and the raw regular-scan kinds --
 **VAD**, **Stare**, **Wind Profile** and **RHI** -- each of which gets
 a distance/time intensity+beta History image built from their raw
-per-gate data (no instrument-processed profile of their own). **RHI**
-additionally gets its own **Profile** mode: a single scan's
-distance/height cross section (radial velocity and beta), the only
-other kind besides Processed Wind Profile with one. Any other kind
-found on disk is still listed (so you can see what's in your data
-tree) but reported as not yet implemented.
+per-gate data (no instrument-processed profile of their own), plus two
+single-scan views of radial velocity and beta: **RHI** (the scan's
+points projected onto the vertical plane along the first ray's
+azimuth) and **PPI** (projected onto the horizontal plane), each drawn
+as dots or, optionally, filled by inverse-distance-weighted interpolation.
+Any other kind found on disk is still listed (so you can see what's in
+your data tree) but reported as not yet implemented.
+
+[![Documentation](https://img.shields.io/badge/docs-GitLab%20Pages-blue)](https://uwm.gitlab-pages.uni-trier.de/lidar/haloviewer/)
+[![PyPI](https://img.shields.io/pypi/v/HaloViewer)](https://pypi.org/project/HaloViewer/)
+[![Source code](https://img.shields.io/badge/source-GitHub-181717?logo=github)](https://github.com/cdruee/haloviewer)
 
 ## Installation
 
@@ -24,8 +31,8 @@ conda env create -f environment.yml
 conda activate haloviewer
 ```
 
-This only adds `numpy`, `pandas` and `matplotlib` on top of a base
-Python; the GUI toolkit (Tkinter) ships with the standard `python`
+This only adds `numpy`, `pandas`, `matplotlib` and `scipy` on top of a
+base Python; the GUI toolkit (Tkinter) ships with the standard `python`
 conda package on Linux, macOS and Windows, so nothing extra is needed
 for the GUI itself. Tested against Python 3.9+ on Ubuntu 22.04, 24.04
 and 26.04, macOS and Windows.
@@ -41,26 +48,16 @@ e.g. `sudo apt install python3-tk` on Debian/Ubuntu -- not needed when
 using the conda environment above, since conda's `python` package
 already includes it.)
 
-### Version numbers
-
-The version is derived from the git history by
-[setuptools-scm](https://setuptools-scm.readthedocs.io) and written to
-`haloviewer/_version.py` when the package is installed. To make a
-release, tag it (e.g. `git tag v0.2.0`) and reinstall. Without git
-metadata (e.g. installed from a zip) the version falls back to `0.1.0`.
-Static project information (author, licence, ...) is in
-`haloviewer/_metadata.py`.
-
 ## Contents
 
 HaloViewer provides four ways to work with the data. Each has its own
-page in the full documentation (see below).
+page in the [documentation](https://uwm.gitlab-pages.uni-trier.de/lidar/haloviewer/).
 
 **Graphic viewer -- `haloviewer`.**
 A Tkinter desktop application for browsing a `Proc` tree: pick a
-directory, a file kind and *Profile* or *History* mode, then step
-through single files or whole time windows, with adjustable height,
-distance and speed ranges.
+directory, a file kind and a plot type (*Profile*, *History*, *RHI* or
+*PPI*), then step through single files or whole time windows, with
+adjustable height, distance and speed ranges.
 
 ```bash
 haloviewer /path/to/Data/Proc
@@ -97,68 +94,19 @@ fig = haloviewer.plot("Proc/2026/202609/20260919",
 
 ### Documentation
 
-The full documentation (Sphinx, in `docs/`) describes each tool in
-detail and includes the API reference generated from the docstrings.
-Build it from the project root; the HTML ends up in `build/html/`:
+The full documentation is online at
+<https://uwm.gitlab-pages.uni-trier.de/lidar/haloviewer/>. It describes
+each tool in detail, includes the API reference generated from the
+docstrings, and has a
+[Design](https://uwm.gitlab-pages.uni-trier.de/lidar/haloviewer/design.html)
+page on how the code is organised (modules, scan cache and settings,
+version numbers), how to support further scan kinds, and how to run the
+tests. Its sources (Sphinx) are in `docs/`; to build it locally, run
+this from the project root (the HTML ends up in `build/html/`):
 
 ```bash
 pip install -e ".[docs]"
 sphinx-build -b html docs build/html
-```
-
-## Design
-
-### File structure
-
-The code is layered so each piece can be used, tested and understood
-on its own:
-
-| module | responsibility |
-|---|---|
-| `haloviewer.hpl` | `.hpl` file format parser (adapted from [cdruee/python-readmet](https://github.com/cdruee/python-readmet)'s `hpl` module) |
-| `haloviewer.scan` | finds `.hpl` files under a root directory, classifies them by kind from the filename, indexes by timestamp |
-| `haloviewer.data` | turns parsed files into plain numpy/pandas arrays ready to plot |
-| `haloviewer.plotting` | **pure matplotlib**, no GUI toolkit imports: figure/axes creation and drawing functions |
-| `haloviewer.api` | programmatic entry points (`plot`, `plot_file`, `plot_files`); `plot` also re-exported as `haloviewer.plot` |
-| `haloviewer.cli` | command-line interface on top of `api` |
-| `haloviewer.gui` | Tkinter desktop app; wires widgets to `scan`/`data`/`plotting` and contains no plotting logic itself |
-| `haloviewer.halosync` | standalone data-sync GUI (`halosync` command); standard library only, independent of the other modules |
-| `haloviewer._metadata` | static project information (name, author, licence, ...) |
-| `haloviewer._version` | version number, generated by setuptools-scm at install time (not under version control) |
-
-`plotting.py` never imports `tkinter`, and `gui.py` never calls
-matplotlib drawing primitives directly -- it only calls functions in
-`plotting.py`. This means the exact same plotting code is used by the
-GUI, the CLI, and any script that imports `haloviewer.api`.
-
-### Extending to more scan kinds
-
-`Processed_Wind_Profile`, `VAD`, `Stare`, `Wind_Profile` and `RHI` are
-all implemented; a user-defined pattern (`User1`...`User5` in the raw
-`.hpl` header's `Scan type`) or a future Halo scan kind would follow
-the same recipe:
-
-1. Add a reader to `data.py` that turns a parsed `hpl.DataFile` (or a
-   set of them) into plain arrays.
-2. Add drawing function(s) to `plotting.py` that take those arrays and
-   axes/figure objects -- reuse `create_timeseries_figure`'s two
-   stacked, colour-mapped panels if that shape fits; that's what all
-   three History flavours and RHI's own Profile scatter share.
-3. Register the kind's capabilities in `scan.KIND_CAPABILITIES`
-   (`supported=True`, its plot modes).
-4. Wire the new mode(s) into `api.plot_file`/`plot_files`, and into
-   `gui.HaloViewerApp._plot_kind` (which of the four load/render
-   pipelines applies) and `_update_range_controls_enabled` (which of
-   Height/Distance/Speed make sense for it).
-
-The GUI will then automatically offer that kind and mode as soon as it
-is discovered on disk -- no other GUI changes are needed.
-
-### Tests
-
-```bash
-pip install -e ".[dev]"
-pytest
 ```
 
 ## Licence

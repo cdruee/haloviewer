@@ -96,12 +96,23 @@ class FileEntry:
 # Kind capabilities registry
 # -------------------------------------------------------------------------
 
+#: Single processed wind profile (``Processed_Wind_Profile`` only).
 PROFILE_MODE = 'profile'
 #: Internal mode key kept as "timeseries" for backward compatibility;
 #: the GUI shows this mode to the user as "History" (it now covers not
 #: just the wind-profile height/time image but the same binned,
 #: intensity/beta "scan history" image for VAD/Stare/RHI/Wind_Profile).
 TIMESERIES_MODE = 'timeseries'
+#: One scan's points projected onto the vertical x/z plane, x pointing
+#: horizontally along the azimuth of the scan's first ray.
+RHI_MODE = 'rhi'
+#: One scan's points projected onto the horizontal x/y plane (same x
+#: axis as :data:`RHI_MODE`, y 90 degrees counter-clockwise from it).
+PPI_MODE = 'ppi'
+
+#: Modes that show a single scan/profile at a time (browsed file by
+#: file), as opposed to a History of many files.
+SINGLE_SCAN_MODES = (PROFILE_MODE, RHI_MODE, PPI_MODE)
 
 
 @dataclass(frozen=True)
@@ -117,13 +128,14 @@ class KindInfo:
 # listed here still show up (so the user can see what's in their data
 # tree) but are reported as "not yet implemented" -- see api.plot_file.
 #
-# Only Processed_Wind_Profile and RHI have a "Profile" mode (a single
-# scan shown by itself); the GUI greys out the Profile radio button for
-# every other kind. Every supported kind has "History" (the internal
-# TIMESERIES_MODE key) -- a multiple-file, time-binned image, built from
-# either the processed height/direction/speed profile (for
-# Processed_Wind_Profile) or the raw per-gate intensity/beta from the
-# regular scan files (for VAD/Stare/Wind_Profile/RHI).
+# The first mode listed is each kind's default. Only
+# Processed_Wind_Profile has a "Profile" mode (its own height/speed/
+# direction profile); every regular scan kind (VAD/Stare/Wind_Profile/
+# RHI) instead has the two single-scan projections RHI and PPI (built
+# from the raw per-gate geometry, see data.load_scan_points).
+# Processed_Wind_Profile has neither RHI nor PPI (it has no rays).
+# Every supported kind has "History" (the internal TIMESERIES_MODE
+# key) -- a multiple-file, time-binned image.
 KIND_CAPABILITIES: Dict[str, KindInfo] = {
     'Processed_Wind_Profile': KindInfo(
         name='Processed_Wind_Profile',
@@ -134,33 +146,36 @@ KIND_CAPABILITIES: Dict[str, KindInfo] = {
     ),
     'VAD': KindInfo(
         name='VAD',
-        modes=(TIMESERIES_MODE,),
+        modes=(TIMESERIES_MODE, RHI_MODE, PPI_MODE),
         supported=True,
         description='Conical (constant-elevation) scan: raw intensity '
-                    'and backscatter (beta) history only.',
+                    'and backscatter (beta) history, or one scan '
+                    'projected as RHI/PPI.',
     ),
     'Stare': KindInfo(
         name='Stare',
-        modes=(TIMESERIES_MODE,),
+        modes=(TIMESERIES_MODE, RHI_MODE, PPI_MODE),
         supported=True,
         description='Fixed-pointing scan: raw intensity and '
-                    'backscatter (beta) history only.',
+                    'backscatter (beta) history, or one scan projected '
+                    'as RHI/PPI.',
     ),
     'Wind_Profile': KindInfo(
         name='Wind_Profile',
-        modes=(TIMESERIES_MODE,),
+        modes=(TIMESERIES_MODE, RHI_MODE, PPI_MODE),
         supported=True,
         description='Raw multi-beam scan behind the processed wind '
-                    'profile: intensity and backscatter (beta) history '
-                    'only.',
+                    'profile: intensity and backscatter (beta) history, '
+                    'or one scan projected as RHI/PPI.',
     ),
     'RHI': KindInfo(
         name='RHI',
-        modes=(PROFILE_MODE, TIMESERIES_MODE),
+        modes=(RHI_MODE, TIMESERIES_MODE, PPI_MODE),
         supported=True,
-        description='Range-height indicator (vertical) scan: a single '
-                    'scan\'s distance/height cross section (radial '
-                    'velocity, beta), or an intensity/beta history.',
+        description='Range-height indicator (vertical) scan: one '
+                    'scan\'s vertical (RHI) or horizontal (PPI) '
+                    'projection (radial velocity, beta), or an '
+                    'intensity/beta history.',
     ),
 }
 
