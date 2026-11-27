@@ -107,7 +107,9 @@ Important assumptions (please check these match your setup):
     reset by switching alerts off/on. Optional "canary" all-clear
     messages after unremarkable syncs are sent at most once a day by
     default. Messages go by email, either through any SMTP server or
-    through Gmail (with a Google app password). The tick-box is greyed
+    through Gmail (with a Google app password), and/or as push messages
+    through ntfy (https://ntfy.sh or another ntfy server; a plain HTTP
+    POST to a public topic). The tick-box is greyed
     out while "sync every ... h" is not ticked or no alert channel is
     completely configured; the bell next to it shows the alert state
     (grey off, green OK, orange mail failed, red faulty; hover for
@@ -134,7 +136,10 @@ import socket
 import ssl
 import threading
 import queue
+import secrets
 import time
+import urllib.error
+import urllib.request
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from dataclasses import dataclass, field, fields, asdict, replace
@@ -536,6 +541,9 @@ SMTP_TIMEOUT_S = 20.0
 GMAIL_HOST = "smtp.gmail.com"
 GMAIL_PORT = 587
 GMAIL_SECURITY = "STARTTLS"
+NTFY_DEFAULT_SERVER = "https://ntfy.sh"
+NTFY_TIMEOUT_S = 20.0
+_NTFY_TOPIC_RE = re.compile(r"^[-_A-Za-z0-9]{1,64}$")
 
 # Prefixes of a stored password: how it was protected (see protect_secret)
 _SECRET_DPAPI = "dpapi:"
@@ -561,9 +569,13 @@ class AlertConfig:
     smtp_user: str = ""
     smtp_password: str = ""
     smtp_sender: str = ""          # empty: use smtp_user
+    smtp_no_verify: bool = False   # don't check the server certificate (insecure)
     gmail_address: str = ""
     gmail_password: str = ""       # a Google *app* password
     recipients: str = ""           # comma/semicolon/space separated
+    via_ntfy: bool = False         # push messages through an ntfy server
+    ntfy_server: str = NTFY_DEFAULT_SERVER
+    ntfy_topic: str = ""           # public topic: anyone knowing it can read it
 
 
 _SECRET_FIELDS = ("smtp_password", "gmail_password")
@@ -583,14 +595,16 @@ def email_settings(cfg: AlertConfig) -> dict:
         return {"host": GMAIL_HOST, "port": GMAIL_PORT,
                 "security": GMAIL_SECURITY, "user": addr,
                 "password": cfg.gmail_password, "sender": addr,
-                "recipients": parse_recipients(cfg.recipients)}
+                "recipients": parse_recipients(cfg.recipients),
+                "no_verify": False}
     user = cfg.smtp_user.strip()
     return {"host": cfg.smtp_host.strip(), "port": int(cfg.smtp_port),
             "security": cfg.smtp_security if cfg.smtp_security in SMTP_SECURITY
             else "STARTTLS",
             "user": user, "password": cfg.smtp_password,
             "sender": cfg.smtp_sender.strip() or user,
-            "recipients": parse_recipients(cfg.recipients)}
+            "recipients": parse_recipients(cfg.recipients),
+            "no_verify": bool(cfg.smtp_no_verify)}
 
 
 def email_missing(cfg: AlertConfig) -> List[str]:
@@ -624,7 +638,41 @@ def alerts_configured(cfg: AlertConfig) -> bool:
     (a threshold or canary messages)."""
     if not (cfg.min_files > 0 or cfg.min_kb > 0 or cfg.canary):
         return False
-    return cfg.via_email and not email_missing(cfg)
+    return bool(active_channels(cfg))
+
+
+def ntfy_url(cfg: AlertConfig) -> str:
+    """The URL messages are posted to (and that subscribers open):
+    <server>/<topic>; the server defaults to https://ntfy.sh."""
+    server = (cfg.ntfy_server or "").strip() or NTFY_DEFAULT_SERVER
+    if "://" not in server:
+        server = "https://" + server
+    return server.rstrip("/") + "/" + cfg.ntfy_topic.strip()
+
+
+def ntfy_missing(cfg: AlertConfig) -> List[str]:
+    """What is still missing or wrong in the ntfy settings (empty list =
+    complete)."""
+    missing = []
+    server = (cfg.ntfy_server or "").strip()
+    if server and "://" in server and not server.lower().startswith(("http://", "https://")):
+        missing.append("server (must start with https://)")
+    topic = cfg.ntfy_topic.strip()
+    if not topic:
+        missing.append("topic")
+    elif not _NTFY_TOPIC_RE.match(topic):
+        missing.append("topic (letters, digits, - and _ only, at most 64)")
+    return missing
+
+
+def active_channels(cfg: AlertConfig) -> List[str]:
+    """The channels that are switched on *and* completely set up."""
+    out = []
+    if cfg.via_email and not email_missing(cfg):
+        out.append("email")
+    if cfg.via_ntfy and not ntfy_missing(cfg):
+        out.append("ntfy")
+    return out
 
 
 @dataclass
@@ -703,11 +751,13 @@ def build_alert_message(cfg: AlertConfig, kind: str, files: int, nbytes: int,
                         source: str = "", dest: str = "", note: str = "",
                         errors: Optional[List[str]] = None,
                         when: Optional[datetime] = None,
-                        faulty_since: str = "") -> EmailMessage:
+                        faulty_since: str = "",
+                        channel: str = "email") -> EmailMessage:
     """Builds the email for an alert (kind="alert"), the all-clear after
     an alert (kind="recovered"), a canary message (kind="canary") or a
     test message (kind="test"). `faulty_since` (ISO time) is the start
-    of the faulty spell, for "alert" and "recovered"."""
+    of the faulty spell, for "alert" and "recovered". `channel` ("email"
+    or "ntfy") only changes what a test message lists."""
     s = email_settings(cfg)
     when = when or datetime.now()
     host = socket.gethostname()
@@ -726,6 +776,8 @@ def build_alert_message(cfg: AlertConfig, kind: str, files: int, nbytes: int,
         subject = f"[halosync] test message from {host}"
         head = ("This is a test message from halosync: alert messages from "
                 "this computer reach you.")
+        if channel == "ntfy":
+            subject = f"[halosync] test notification from {host}"
     crit = []
     if cfg.min_files > 0:
         crit.append(f"fewer than {cfg.min_files} files")
@@ -741,9 +793,9 @@ def build_alert_message(cfg: AlertConfig, kind: str, files: int, nbytes: int,
                 else "after every faulty sync")
         canary = (("at most once a day" if cfg.canary_daily
                    else "after every good sync") if cfg.canary else "off")
-        lines += [
+        lines += ([f"ntfy topic:   {ntfy_url(cfg)}"] if channel == "ntfy" else [
             f"Mail server:  {s['host']}:{s['port']} ({s['security']})",
-            f"Sender:       {s['sender']}",
+            f"Sender:       {s['sender']}"]) + [
             f"Alert if:     {' or '.join(crit) if crit else '(no thresholds)'}",
             f"Alerts:       {once}",
             f"Canary:       {canary}",
@@ -781,8 +833,13 @@ def build_alert_message(cfg: AlertConfig, kind: str, files: int, nbytes: int,
 
 def _smtp_open(s: dict, timeout: float = SMTP_TIMEOUT_S) -> smtplib.SMTP:
     """Connects (and, where given, logs in) according to email_settings().
+    The server certificate is checked unless "no_verify" is set (the
+    "don't check the server certificate" tick-box; never for Gmail).
     Raises smtplib.SMTPException / OSError on failure."""
     ctx = ssl.create_default_context()
+    if s.get("no_verify"):
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
     if s["security"] == "SSL/TLS":
         conn = smtplib.SMTP_SSL(s["host"], s["port"], timeout=timeout, context=ctx)
     else:
@@ -838,8 +895,71 @@ def smtp_send_test(cfg: AlertConfig, timeout: float = SMTP_TIMEOUT_S) -> str:
     return text + " -- check the inbox (and the spam folder)"
 
 
+_NTFY_STYLE = {   # kind -> (priority, tags); tags become emojis in the apps
+    "alert": ("high", "warning"),
+    "recovered": ("default", "white_check_mark"),
+    "canary": ("low", "bird"),
+    "test": ("default", "test_tube"),
+}
+
+
+def send_ntfy(cfg: AlertConfig, msg: EmailMessage, kind: str,
+              timeout: float = NTFY_TIMEOUT_S) -> int:
+    """Publishes msg (built by build_alert_message) to the ntfy topic:
+    a plain HTTP POST of the text, with title, priority and tags as
+    headers. Returns the HTTP status; raises urllib.error.URLError /
+    HTTPError (or OSError) on failure."""
+    title = str(msg["Subject"]).replace("[halosync] ", "", 1)
+    priority, tags = _NTFY_STYLE.get(kind, ("default", ""))
+    req = urllib.request.Request(
+        ntfy_url(cfg), data=msg.get_content().strip().encode("utf-8"),
+        method="POST",
+        headers={"Title": title.encode("ascii", "replace").decode("ascii"),
+                 "Priority": priority, "Tags": tags})
+    with urllib.request.urlopen(req, timeout=timeout,
+                                context=ssl.create_default_context()) as resp:
+        return resp.status
+
+
+def ntfy_send_test(cfg: AlertConfig, timeout: float = NTFY_TIMEOUT_S) -> str:
+    """Sends a test notification; returns a short success text, raises on
+    failure."""
+    missing = ntfy_missing(cfg)
+    if missing:
+        raise ValueError("missing: " + ", ".join(missing))
+    send_ntfy(cfg, build_alert_message(cfg, "test", 0, 0, channel="ntfy"),
+              "test", timeout)
+    return f"test message sent to {ntfy_url(cfg)} -- check the ntfy app"
+
+
+def deliver(cfg: AlertConfig, kind: str, files: int, nbytes: int,
+            **message_kw) -> Dict[str, Optional[str]]:
+    """Sends an alert/recovery/canary message through every active
+    channel (active_channels). Returns {channel: None if sent, else a
+    description of the error}; never raises."""
+    results: Dict[str, Optional[str]] = {}
+    for channel in active_channels(cfg):
+        try:
+            msg = build_alert_message(cfg, kind, files, nbytes,
+                                      channel=channel, **message_kw)
+            if channel == "email":
+                send_email(cfg, msg)
+            else:
+                send_ntfy(cfg, msg, kind)
+            results[channel] = None
+        except Exception as exc:
+            results[channel] = describe_error(exc)
+    return results
+
+
 def describe_error(exc: BaseException) -> str:
     """A one-line, human readable description of an SMTP/network error."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"ntfy server answered {exc.code} {exc.reason}"
+    if isinstance(exc, urllib.error.URLError):
+        if isinstance(exc.reason, BaseException):
+            return describe_error(exc.reason)
+        return f"server not reachable: {exc.reason}"
     if isinstance(exc, smtplib.SMTPAuthenticationError):
         return "login refused (check user name/password; Gmail needs an app password)"
     if isinstance(exc, smtplib.SMTPRecipientsRefused):
@@ -849,6 +969,9 @@ def describe_error(exc: BaseException) -> str:
         return f"sender refused: {exc.sender}"
     if isinstance(exc, smtplib.SMTPNotSupportedError):
         return f"not supported by the server: {exc}"
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        why = exc.verify_message or exc.reason or str(exc)
+        return f"server certificate not accepted: {why}"
     if isinstance(exc, ssl.SSLError):
         return f"encryption failed ({exc.reason or exc}); check port/encryption"
     if isinstance(exc, socket.timeout):
@@ -1490,8 +1613,11 @@ class AlertSetupDialog(tk.Toplevel):
         mail = ttk.Frame(self.nb, padding=12)
         self.nb.add(gen, text="General")
         self.nb.add(mail, text="Email")
+        ntfy = ttk.Frame(self.nb, padding=12)
+        self.nb.add(ntfy, text="ntfy")
         self._build_general(gen, cfg)
         self._build_email(mail, cfg)
+        self._build_ntfy(ntfy, cfg)
 
         btns = ttk.Frame(self, padding=(10, 8))
         btns.pack(fill="x")
@@ -1515,6 +1641,7 @@ class AlertSetupDialog(tk.Toplevel):
         self.canary_daily_var = tk.BooleanVar(value=cfg.canary_daily)
         self.alert_once_var = tk.BooleanVar(value=cfg.alert_once)
         self.via_email_var = tk.BooleanVar(value=cfg.via_email)
+        self.via_ntfy_var = tk.BooleanVar(value=cfg.via_ntfy)
 
         th = ttk.Frame(f)
         th.grid(row=0, column=0, sticky="w")
@@ -1548,7 +1675,11 @@ class AlertSetupDialog(tk.Toplevel):
         ttk.Checkbutton(f, text="Send via email", variable=self.via_email_var).grid(
             row=7, column=0, sticky="w")
         ttk.Label(f, text="set up on the \"Email\" tab", **hint).grid(
-            row=8, column=0, sticky="w", padx=(22, 0))
+            row=8, column=0, sticky="w", padx=(22, 0), pady=(0, 4))
+        ttk.Checkbutton(f, text="Send via ntfy (push messages to phone or browser)",
+                        variable=self.via_ntfy_var).grid(row=9, column=0, sticky="w")
+        ttk.Label(f, text="set up on the \"ntfy\" tab", **hint).grid(
+            row=10, column=0, sticky="w", padx=(22, 0))
         self._canary_changed()
 
     def _canary_changed(self):
@@ -1563,6 +1694,7 @@ class AlertSetupDialog(tk.Toplevel):
         self.user_var = tk.StringVar(value=cfg.smtp_user)
         self.password_var = tk.StringVar(value=cfg.smtp_password)
         self.sender_var = tk.StringVar(value=cfg.smtp_sender)
+        self.no_verify_var = tk.BooleanVar(value=cfg.smtp_no_verify)
         self.gmail_var = tk.StringVar(value=cfg.gmail_address)
         self.gmail_pw_var = tk.StringVar(value=cfg.gmail_password)
         self.recipients_var = tk.StringVar(value=cfg.recipients)
@@ -1596,6 +1728,9 @@ class AlertSetupDialog(tk.Toplevel):
             row=4, column=1, columnspan=3, sticky="ew", pady=2)
         ttk.Label(sf, text="empty = login; leave login empty if the server needs none",
                   foreground="#555555").grid(row=5, column=1, columnspan=3, sticky="w")
+        ttk.Checkbutton(sf, text="Don't check the server certificate (insecure)",
+                        variable=self.no_verify_var).grid(
+            row=6, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
         ttk.Radiobutton(f, text="Gmail", value="gmail", variable=self.mode_var,
                         command=self._mode_changed).grid(row=2, column=0, sticky="w")
@@ -1631,6 +1766,75 @@ class AlertSetupDialog(tk.Toplevel):
         self.test_label.pack(side="left", fill="x", padx=(8, 0))
 
         self._mode_changed()
+
+    def _build_ntfy(self, f, cfg: AlertConfig):
+        self.ntfy_server_var = tk.StringVar(value=cfg.ntfy_server or NTFY_DEFAULT_SERVER)
+        self.ntfy_topic_var = tk.StringVar(value=cfg.ntfy_topic)
+        f.columnconfigure(1, weight=1)
+        hint = dict(foreground="#555555", wraplength=400, justify="left")
+        ttk.Label(f, text="Server").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
+        ttk.Entry(f, textvariable=self.ntfy_server_var).grid(
+            row=0, column=1, columnspan=2, sticky="ew", pady=2)
+        ttk.Label(f, text="Topic").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=2)
+        ttk.Entry(f, textvariable=self.ntfy_topic_var).grid(
+            row=1, column=1, sticky="ew", pady=2)
+        ttk.Button(f, text="Generate", command=self._generate_topic).grid(
+            row=1, column=2, sticky="e", padx=(6, 0), pady=2)
+        ttk.Label(f, text="Topics on a public server are not protected: anyone who "
+                          "knows the name can read and send messages on it. Use a "
+                          "long, hard-to-guess name (\"Generate\" makes one).",
+                  **hint).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 8))
+        ttk.Label(f, text="To receive the messages, subscribe to the topic in the "
+                          "ntfy app (Android, iOS) or open this address in a "
+                          "browser:", **hint).grid(
+            row=3, column=0, columnspan=3, sticky="w")
+        self.ntfy_url_label = ttk.Label(f, text="", foreground="#1b4f72")
+        self.ntfy_url_label.grid(row=4, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        for var in (self.ntfy_server_var, self.ntfy_topic_var):
+            var.trace_add("write", lambda *_a: self._show_ntfy_url())
+        self._show_ntfy_url()
+
+        tf = ttk.Frame(f)
+        tf.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(14, 0))
+        self.ntfy_test_btn = ttk.Button(tf, text="Send test message",
+                                        command=self._test_ntfy)
+        self.ntfy_test_btn.pack(side="left", anchor="n")
+        self.ntfy_test_label = tk.Label(tf, text="", anchor="w", justify="left",
+                                        wraplength=260)
+        self.ntfy_test_label.pack(side="left", fill="x", padx=(8, 0))
+
+    def _ntfy_cfg(self) -> AlertConfig:
+        return AlertConfig(ntfy_server=self.ntfy_server_var.get().strip()
+                           or NTFY_DEFAULT_SERVER,
+                           ntfy_topic=self.ntfy_topic_var.get().strip())
+
+    def _show_ntfy_url(self):
+        cfg = self._ntfy_cfg()
+        self.ntfy_url_label.configure(
+            text=ntfy_url(cfg) if not ntfy_missing(cfg) else "(enter a topic)")
+
+    def _generate_topic(self):
+        self.ntfy_topic_var.set("halosync-" + secrets.token_hex(8))
+
+    def _test_ntfy(self):
+        cfg = self._ntfy_cfg()
+        missing = ntfy_missing(cfg)
+        if missing:
+            self.ntfy_test_label.configure(text="\u2717 missing: " + ", ".join(missing),
+                                           fg="#c0392b")
+            return
+        self.ntfy_test_btn.state(["disabled"])
+        self.ntfy_test_label.configure(text="sending ...", fg="#555555")
+
+        def done(ok, value):
+            self.ntfy_test_btn.state(["!disabled"])
+            if ok:
+                self.ntfy_test_label.configure(text=f"\u2713 {value}", fg="#1e8449")
+            else:
+                self.ntfy_test_label.configure(text=f"\u2717 {describe_error(value)}",
+                                               fg="#c0392b")
+
+        _run_in_background(self, lambda: ntfy_send_test(cfg), done)
 
     # -- behaviour -----------------------------------------------------------
     @staticmethod
@@ -1687,6 +1891,9 @@ class AlertSetupDialog(tk.Toplevel):
             canary_daily=self.canary_daily_var.get(),
             alert_once=self.alert_once_var.get(),
             via_email=self.via_email_var.get(),
+            via_ntfy=self.via_ntfy_var.get(),
+            ntfy_server=self.ntfy_server_var.get().strip() or NTFY_DEFAULT_SERVER,
+            ntfy_topic=self.ntfy_topic_var.get().strip(),
             email_mode="gmail" if self.mode_var.get() == "gmail" else "smtp",
             smtp_host=self.host_var.get().strip(),
             smtp_port=self._port(),
@@ -1694,6 +1901,7 @@ class AlertSetupDialog(tk.Toplevel):
             smtp_user=self.user_var.get().strip(),
             smtp_password=self.password_var.get(),
             smtp_sender=self.sender_var.get().strip(),
+            smtp_no_verify=self.no_verify_var.get(),
             gmail_address=self.gmail_var.get().strip(),
             gmail_password=self.gmail_pw_var.get(),
             recipients=self.recipients_var.get().strip(),
@@ -1731,19 +1939,25 @@ class AlertSetupDialog(tk.Toplevel):
         except ValueError as exc:
             messagebox.showerror("Alert setup", str(exc), parent=self)
             return
+        problems = []
         if cfg.via_email and email_missing(cfg):
+            problems.append("email settings incomplete (missing: "
+                            + ", ".join(email_missing(cfg)) + ")")
+        if cfg.via_ntfy and ntfy_missing(cfg):
+            problems.append("ntfy settings incomplete (missing: "
+                            + ", ".join(ntfy_missing(cfg)) + ")")
+        if not (cfg.via_email or cfg.via_ntfy):
+            problems.append("neither \"Send via email\" nor \"Send via ntfy\" "
+                            "is ticked, so there is no way to send alerts")
+        if problems:
+            usable = active_channels(cfg)
             messagebox.showwarning(
                 "Alert setup",
-                "The email settings are incomplete (missing: "
-                + ", ".join(email_missing(cfg))
-                + ").\n\nThe settings are saved, but alerts cannot be "
-                  "enabled until this is completed.", parent=self)
-        elif not cfg.via_email:
-            messagebox.showwarning(
-                "Alert setup",
-                "\"Send via email\" is not ticked, so there is no way to send "
-                "alerts.\n\nThe settings are saved, but alerts cannot be "
-                "enabled until a channel is chosen.", parent=self)
+                "\n".join("\u2022 " + p for p in problems)
+                + ("\n\nThe settings are saved; alerts go out via "
+                   + " and ".join(usable) + " only." if usable else
+                   "\n\nThe settings are saved, but alerts cannot be enabled "
+                   "until a channel is completely set up."), parent=self)
         self.on_save(cfg)
         self.destroy()
 
@@ -2384,8 +2598,8 @@ class LidarSyncApp:
         """Called after every scheduled sync (also when there was nothing
         to copy): updates the remembered alert state and sends an alert,
         recovery or canary message if one is due (see next_message). The
-        message is sent in a background thread so a slow mail server
-        never blocks the GUI."""
+        message is sent (through every active channel, see deliver) in a
+        background thread so a slow server never blocks the GUI."""
         if not self._alerts_active():
             return
         faulty = sync_is_faulty(self.alert_cfg, files, nbytes)
@@ -2402,31 +2616,35 @@ class LidarSyncApp:
                 fg="#c0392b" if faulty else "#555555")
             return
         cfg = replace(self.alert_cfg)
-        msg = build_alert_message(
-            cfg, kind, files, nbytes,
-            source=str(self.source_root or ""), dest=str(self.dest_root or ""),
-            note=note, errors=errors, faulty_since=faulty_since)
+        kw = dict(source=str(self.source_root or ""), dest=str(self.dest_root or ""),
+                  note=note, errors=errors, faulty_since=faulty_since)
         what = {"alert": "alert", "recovered": "recovery message"}.get(
             kind, "canary message")
         self.alert_status_label.configure(text=f"sending {what} ...", fg="#555555")
 
-        def done(ok, value):
+        def done(ok, results):
             ts = time.strftime("%d.%m. %H:%M")
-            if ok:
+            if not ok:                      # deliver() never raises; just in case
+                results = {"all": describe_error(results)}
+            sent = [ch for ch, err in results.items() if err is None]
+            failed = {ch: err for ch, err in results.items() if err is not None}
+            if sent:
                 self.alert_state = mark_sent(self.alert_state, kind)
-                self._alert_send_failed = ""
                 self._save_alert_config()
-                self.alert_status_label.configure(
-                    text=f"{what} sent {ts}",
-                    fg="#c0392b" if kind == "alert" else "#555555")
-            else:
-                self._alert_send_failed = describe_error(value)
-                self.alert_status_label.configure(
-                    text=f"{what} NOT sent {ts}: {self._alert_send_failed}",
-                    fg="#c0392b")
+            self._alert_send_failed = "; ".join(f"{ch}: {err}"
+                                                for ch, err in failed.items())
+            text = (f"{what} sent via {' and '.join(sent)} {ts}" if sent
+                    else f"{what} NOT sent {ts}")
+            if failed:
+                text += ("; " if sent else ": ") + "; ".join(
+                    (f"{ch} NOT sent: {err}" if sent else f"{ch}: {err}")
+                    for ch, err in failed.items())
+            self.alert_status_label.configure(
+                text=text, fg="#c0392b" if failed or kind == "alert" else "#555555")
             self._update_alert_icon()
 
-        _run_in_background(self.root, lambda: send_email(cfg, msg), done)
+        _run_in_background(self.root,
+                           lambda: deliver(cfg, kind, files, nbytes, **kw), done)
 
 def main():
     root = tk.Tk()

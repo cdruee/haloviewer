@@ -74,6 +74,13 @@ class _SMTPHandler(socketserver.StreamRequestHandler):
     def _send(self, line):
         self.wfile.write((line + "\r\n").encode())
 
+    def _starttls(self):
+        self._send("220 go ahead")
+        self.request = self.server.tls_context.wrap_socket(
+            self.request, server_side=True)
+        self.rfile = self.request.makefile("rb")
+        self.wfile = self.request.makefile("wb", buffering=0)
+
     def handle(self):
         log = self.server.log
         self._send("220 test ESMTP")
@@ -85,7 +92,16 @@ class _SMTPHandler(socketserver.StreamRequestHandler):
             cmd = line.split(" ", 1)[0].upper()
             log.append(line)
             if cmd in ("EHLO", "HELO"):
-                self._send("250 test")
+                if getattr(self.server, "tls_context", None):
+                    self._send("250-test")
+                    self._send("250 STARTTLS")
+                else:
+                    self._send("250 test")
+            elif cmd == "STARTTLS":
+                try:
+                    self._starttls()
+                except OSError:      # client refused our certificate
+                    return
             elif cmd == "MAIL":
                 self._send("250 ok")
             elif cmd == "RCPT":
@@ -119,6 +135,47 @@ def smtp_server():
     yield srv
     srv.shutdown()
     srv.server_close()
+
+
+@pytest.fixture
+def tls_server(smtp_server, tmp_path):
+    """The test SMTP server with STARTTLS and a self-signed certificate."""
+    import shutil
+    import ssl
+    import subprocess
+    if not shutil.which("openssl"):
+        pytest.skip("openssl command not available")
+    key, crt = tmp_path / "key.pem", tmp_path / "cert.pem"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", str(key), "-out", str(crt), "-days", "2",
+                    "-subj", "/CN=halosync-test"],
+                   check=True, capture_output=True)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(str(crt), str(key))
+    smtp_server.tls_context = ctx
+    return smtp_server
+
+
+def test_certificate_is_checked_unless_switched_off(tls_server):
+    import ssl
+    cfg = _smtp_cfg(smtp_port=tls_server.server_address[1],
+                    smtp_security="STARTTLS")
+    assert not cfg.smtp_no_verify                         # checked by default
+    with pytest.raises(ssl.SSLCertVerificationError) as exc:
+        halosync.smtp_send_test(cfg, timeout=5)
+    assert halosync.describe_error(exc.value).startswith(
+        "server certificate not accepted: self")           # "self-signed ..."
+    assert tls_server.messages == []
+    cfg.smtp_no_verify = True
+    assert halosync.smtp_send_test(cfg, timeout=5).startswith("test mail sent")
+    assert any(line.upper() == "STARTTLS" for line in tls_server.log)
+    assert len(tls_server.messages) == 1
+
+
+def test_gmail_certificate_always_checked():
+    cfg = halosync.AlertConfig(email_mode="gmail", smtp_no_verify=True,
+                               gmail_address="me@gmail.com", recipients="a@b.c")
+    assert halosync.email_settings(cfg)["no_verify"] is False
 
 
 def test_sync_is_faulty_thresholds():
@@ -208,6 +265,7 @@ def test_alerts_configured_and_missing():
 def test_alert_config_roundtrip_hides_passwords(tmp_path):
     path = tmp_path / "alerts.json"
     cfg = _smtp_cfg(enabled=True, smtp_user="u", smtp_password="s3cr3t-pw",
+                    smtp_no_verify=True,
                     gmail_password="gmail-pw", min_files=7, canary=True)
     halosync.save_alert_config(path, cfg)
     text = path.read_text()
@@ -403,6 +461,9 @@ def test_alert_setup_dialog_collect(app):
     dlg = halosync.AlertSetupDialog(app.root, _smtp_cfg(smtp_port=2525),
                                     on_save=lambda c: None)
     try:
+        assert dlg.collect().smtp_no_verify is False
+        dlg.no_verify_var.set(True)
+        assert dlg.collect().smtp_no_verify is True
         dlg.min_files_var.set("5")
         dlg.mode_var.set("gmail")
         dlg._mode_changed()
@@ -497,3 +558,152 @@ def test_failed_mail_shows_orange_and_retries(app, monkeypatch):
     app._check_alerts(0, 0)                            # faulty wins over mail failure
     assert _wait_until(app, lambda: app.alert_icon.icon_state == "faulty")
     assert not app.alert_state.alert_sent
+
+
+# -- ntfy ---------------------------------------------------------------------
+
+import http.server  # noqa: E402
+
+
+class _NtfyHandler(http.server.BaseHTTPRequestHandler):
+    """Records POSTs like an ntfy server; topic "denied" gets a 403."""
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.server.posts.append((self.path, dict(self.headers), body.decode("utf-8")))
+        if self.path == "/denied":
+            self.send_error(403, "Forbidden")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"id":"x","event":"message"}')
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def ntfy_server():
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _NtfyHandler)
+    srv.daemon_threads = True
+    srv.posts = []
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    srv.url = f"http://127.0.0.1:{srv.server_address[1]}"
+    yield srv
+    srv.shutdown()
+    srv.server_close()
+
+
+def _ntfy_cfg(server, topic="halosync-test", **kw):
+    return halosync.AlertConfig(via_ntfy=True, ntfy_server=server.url,
+                                ntfy_topic=topic, **kw)
+
+
+def test_ntfy_settings():
+    cfg = halosync.AlertConfig(via_ntfy=True)
+    assert cfg.ntfy_server == "https://ntfy.sh"
+    assert halosync.ntfy_missing(cfg) == ["topic"]
+    assert not halosync.alerts_configured(cfg)
+    cfg.ntfy_topic = "bad topic!"
+    assert "letters, digits" in halosync.ntfy_missing(cfg)[0]
+    cfg.ntfy_topic = "halosync-abc_1"
+    assert halosync.ntfy_missing(cfg) == []
+    assert halosync.ntfy_url(cfg) == "https://ntfy.sh/halosync-abc_1"
+    cfg.ntfy_server = "ntfy.example.org/"
+    assert halosync.ntfy_url(cfg) == "https://ntfy.example.org/halosync-abc_1"
+    assert halosync.active_channels(cfg) == ["ntfy"]
+    assert halosync.alerts_configured(cfg)                 # ntfy alone is enough
+    both = _smtp_cfg(via_ntfy=True, ntfy_topic="t")
+    assert halosync.active_channels(both) == ["email", "ntfy"]
+
+
+def test_ntfy_test_message(ntfy_server):
+    text = halosync.ntfy_send_test(_ntfy_cfg(ntfy_server), timeout=5)
+    assert text == f"test message sent to {ntfy_server.url}/halosync-test -- check the ntfy app"
+    (path, headers, body), = ntfy_server.posts
+    assert path == "/halosync-test"
+    assert headers["Title"].startswith("test notification from")
+    assert headers["Priority"] == "default" and headers["Tags"] == "test_tube"
+    assert f"ntfy topic:   {ntfy_server.url}/halosync-test" in body
+    assert "Mail server" not in body
+
+
+def test_ntfy_errors(ntfy_server):
+    with pytest.raises(halosync.urllib.error.HTTPError) as exc:
+        halosync.ntfy_send_test(_ntfy_cfg(ntfy_server, topic="denied"), timeout=5)
+    assert halosync.describe_error(exc.value) == "ntfy server answered 403 Forbidden"
+    with pytest.raises(ValueError, match="topic"):
+        halosync.ntfy_send_test(_ntfy_cfg(ntfy_server, topic=""))
+
+
+def test_deliver_through_both_channels(smtp_server, ntfy_server):
+    cfg = _smtp_cfg(smtp_port=smtp_server.server_address[1], via_ntfy=True,
+                    ntfy_server=ntfy_server.url, ntfy_topic="halosync-test")
+    res = halosync.deliver(cfg, "alert", 0, 0, note="lidar stopped")
+    assert res == {"email": None, "ntfy": None}
+    assert "lidar stopped" in smtp_server.messages[0]
+    (path, headers, body), = ntfy_server.posts
+    assert headers["Priority"] == "high" and headers["Tags"] == "warning"
+    assert headers["Title"].startswith("ALERT on ") and "lidar stopped" in body
+
+
+def test_deliver_reports_failed_channel(ntfy_server):
+    # email server not running (port 9 refuses), ntfy fine
+    cfg = _smtp_cfg(smtp_port=9, via_ntfy=True, ntfy_server=ntfy_server.url,
+                    ntfy_topic="halosync-test")
+    res = halosync.deliver(cfg, "canary", 5, 50_000)
+    assert res["ntfy"] is None and res["email"]
+    assert ntfy_server.posts[0][1]["Priority"] == "low"
+
+
+def test_scheduled_alert_via_ntfy_only(app, ntfy_server):
+    app._alert_setup_saved(_ntfy_cfg(ntfy_server))
+    app.sync_schedule_var.set(True)
+    app._on_schedule_toggle()
+    assert str(app.alerts_chk.cget("state")) == "normal"   # ntfy alone enables it
+    app.alerts_var.set(True)
+    app._on_alerts_toggle()
+    app._check_alerts(0, 0, note="no data")
+    assert _wait_until(app, lambda: "sent via ntfy" in app.alert_status_label.cget("text"))
+    assert app.alert_state.alert_sent and len(ntfy_server.posts) == 1
+
+
+def test_partial_failure_still_counts_as_sent(app, ntfy_server, monkeypatch):
+    def fail(cfg, msg):
+        raise ConnectionRefusedError()
+    monkeypatch.setattr(halosync, "send_email", fail)
+    cfg = _smtp_cfg(via_ntfy=True, ntfy_server=ntfy_server.url,
+                    ntfy_topic="halosync-test")
+    app._alert_setup_saved(cfg)
+    app.sync_schedule_var.set(True)
+    app._on_schedule_toggle()
+    app.alerts_var.set(True)
+    app._on_alerts_toggle()
+    app._check_alerts(0, 0)
+    assert _wait_until(app, lambda: "email NOT sent" in app.alert_status_label.cget("text"))
+    assert "sent via ntfy" in app.alert_status_label.cget("text")
+    assert app.alert_state.alert_sent                      # not repeated next time
+    assert app._alert_send_failed.startswith("email: ")
+
+
+def test_dialog_ntfy_tab(app, ntfy_server):
+    dlg = halosync.AlertSetupDialog(app.root, halosync.AlertConfig(),
+                                    on_save=lambda c: None)
+    try:
+        assert dlg.ntfy_url_label.cget("text") == "(enter a topic)"
+        dlg._generate_topic()
+        topic = dlg.ntfy_topic_var.get()
+        assert topic.startswith("halosync-") and len(topic) == 25
+        assert dlg.ntfy_url_label.cget("text") == f"https://ntfy.sh/{topic}"
+        dlg.via_ntfy_var.set(True)
+        dlg.ntfy_server_var.set(ntfy_server.url)
+        cfg = dlg.collect()
+        assert (cfg.via_ntfy, cfg.ntfy_topic, cfg.ntfy_server) == \
+            (True, topic, ntfy_server.url)
+        dlg._test_ntfy()
+        assert _wait_until(app, lambda: "test message sent" in
+                           dlg.ntfy_test_label.cget("text"))
+        assert ntfy_server.posts[0][0] == "/" + topic
+    finally:
+        dlg.destroy()

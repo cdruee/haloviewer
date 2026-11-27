@@ -163,7 +163,11 @@ The **alert setup** dialog has two tabs.
    after a good scheduled sync that day. A *RECOVERED* message counts as
    that day's canary.
 ``Send via email``
-   Send alerts and canary messages by email (set up on the next tab).
+   Send alerts and canary messages by email (set up on the *Email* tab).
+``Send via ntfy``
+   Send them as push messages through `ntfy <https://ntfy.sh>`_ (set up
+   on the *ntfy* tab). Both can be ticked; each message then goes out
+   both ways, and counts as sent if at least one way worked.
 
 A threshold of 0 switches it off; with both at 0 only canary messages
 are sent. A scheduled sync that finds nothing to copy -- source or
@@ -179,6 +183,19 @@ single files are listed too.
    dots), and the sender address (*From*; empty means the login). Leave
    login and password empty for a server that accepts mail without
    authentication, e.g. the institute's internal relay.
+
+   **Don't check the server certificate (insecure)**, off by default:
+   with encryption on, the server's certificate is normally checked
+   against the computer's trusted certificates and the server name. If
+   that fails ("server certificate not accepted: …"), e.g. because a
+   root certificate is missing on the computer or the server uses a
+   self-signed certificate, ticking this box sends the mail anyway.
+   The connection is still encrypted, but no longer protected against
+   someone impersonating the server -- who could then read the login
+   and the messages. Prefer fixing the cause where possible (for a
+   conda Python, start ``halosync`` from the activated environment;
+   on Windows, missing root certificates can be added to the Windows
+   certificate store). Gmail's certificate is always checked.
 *Gmail*
    A Gmail address and an *app password*. Google refuses the normal
    account password for this; app passwords need 2-step verification
@@ -195,6 +212,26 @@ none, or the connection or login failed, the reason is shown (wrong
 password, unknown server, recipient refused, ...). The server accepting
 a message does not guarantee delivery: if nothing arrives, look in the
 spam folder, and check for a bounce message in the sender's mailbox.
+
+**ntfy** -- push messages to a phone or a browser:
+
+*Server*
+   ``https://ntfy.sh`` (the public service, free, no account) or the
+   address of another ntfy server.
+*Topic*
+   The name of the "channel" the messages are posted to; **Generate**
+   makes a random one (``halosync-`` and 16 hexadecimal digits).
+   Topics on a public server are not protected: anyone who knows the
+   name can read and post messages on it, so use a long, hard-to-guess
+   name and don't publish it.
+
+To receive the messages, install the ntfy app (Android, iOS), tap
+*+*, and subscribe to the topic -- or open the address shown on the tab
+(``https://ntfy.sh/<topic>``) in a browser. **Send test message** posts
+a test notification. Alerts arrive with high priority and a ⚠ tag,
+recovery messages with ✅, canaries with low priority. Each message is a
+plain HTTP ``POST`` of the text to ``<server>/<topic>``, with title,
+priority and tags as headers.
 
 Messages are sent in the background, so a slow mail server never
 blocks the window; the result ("alert sent …" or "alert NOT sent: …")
@@ -269,6 +306,12 @@ be tested and reused on its own.
 .. autofunction:: haloviewer.halosync.build_alert_message
 .. autofunction:: haloviewer.halosync.smtp_send_test
 .. autofunction:: haloviewer.halosync.send_email
+.. autofunction:: haloviewer.halosync.ntfy_url
+.. autofunction:: haloviewer.halosync.ntfy_missing
+.. autofunction:: haloviewer.halosync.send_ntfy
+.. autofunction:: haloviewer.halosync.ntfy_send_test
+.. autofunction:: haloviewer.halosync.active_channels
+.. autofunction:: haloviewer.halosync.deliver
 .. autofunction:: haloviewer.halosync.save_alert_config
 .. autofunction:: haloviewer.halosync.load_alert_config
 .. autofunction:: haloviewer.halosync.load_alert_state
