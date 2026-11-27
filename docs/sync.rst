@@ -127,6 +127,99 @@ There is no other background activity. Scans only happen at program
 start, when a path changes, when ↻ is pressed, and before a scheduled
 sync.
 
+Alerts
+------
+
+``halosync`` can send an email when a scheduled sync brings in too
+little new data -- for example because the lidar stopped writing files
+or the network share went away. The **enable alerts** tick-box and the
+**alert setup…** button sit in the *Sync* frame below the schedule.
+The tick-box is greyed out until **sync every … h** is ticked and an
+alert channel is completely set up; alerts are only ever checked after
+*scheduled* syncs, never after a manual one.
+
+The **alert setup** dialog has two tabs.
+
+**General** -- when to send what:
+
+``Send alert if fewer than [2] files synched``
+   Alert if a scheduled sync copied fewer files than this.
+``Send alert if less than [1] kB new data``
+   Alert if it copied less data than this (1 kB = 1024 bytes).
+``Send an alert only once when the sync turns faulty`` (on by default)
+   Send one alert when a scheduled sync first falls below a threshold,
+   and no more while it stays that way. ``halosync`` remembers this (also
+   across program restarts); as soon as a scheduled sync works again it
+   sends a *RECOVERED* message and is ready to alert again. Switching
+   **enable alerts** off and on also starts afresh. Without this option
+   every faulty scheduled sync sends an alert.
+``Send canary messages``
+   After a scheduled sync that does *not* trigger an alert, send a short
+   all-clear ("no alert: … kB in … files synched"). If these stop
+   arriving, alerting itself is broken -- the computer is off, the
+   program was closed or mail cannot get out.
+``only once a day`` (on by default)
+   Send at most one canary message per calendar day: the first one
+   after a good scheduled sync that day. A *RECOVERED* message counts as
+   that day's canary.
+``Send via email``
+   Send alerts and canary messages by email (set up on the next tab).
+
+A threshold of 0 switches it off; with both at 0 only canary messages
+are sent. A scheduled sync that finds nothing to copy -- source or
+destination not reachable, nothing selected, no new files -- counts as
+0 files and 0 bytes, and the reason is given in the message. Errors on
+single files are listed too.
+
+**Email** -- either of two mutually exclusive ways:
+
+*SMTP server*
+   Server name, port, encryption (``STARTTLS``, usually port 587;
+   ``SSL/TLS``, usually 465; or ``none``), login and password (shown as
+   dots), and the sender address (*From*; empty means the login). Leave
+   login and password empty for a server that accepts mail without
+   authentication, e.g. the institute's internal relay.
+*Gmail*
+   A Gmail address and an *app password*. Google refuses the normal
+   account password for this; app passwords need 2-step verification
+   and are created under *Google account → Security → App passwords*.
+   ``halosync`` then sends through ``smtp.gmail.com:587`` with STARTTLS.
+
+*Send to* takes one or more recipients, separated by commas.
+
+**Send test mail** sends a short test message with the settings as
+they are in the dialog (saved or not) to every recipient. It lists the
+mail server, the sender and the alert settings. A tick means the server
+accepted the message; recipients it refused are named, and if it took
+none, or the connection or login failed, the reason is shown (wrong
+password, unknown server, recipient refused, ...). The server accepting
+a message does not guarantee delivery: if nothing arrives, look in the
+spam folder, and check for a bounce message in the sender's mailbox.
+
+Messages are sent in the background, so a slow mail server never
+blocks the window; the result ("alert sent …" or "alert NOT sent: …")
+is shown below the button. There is no immediate retry, but a message
+that could not be sent counts as not sent: the next scheduled sync sends
+it again (an alert even with "only once", a canary even if it is the
+day's first).
+
+The bell next to **enable alerts** shows the alert state at a glance;
+hovering over it gives the details (since when the sync is faulty,
+whether the alert went out, the last canary, the last mail error):
+
+* **grey, crossed out** -- alerts are off (not ticked, no schedule, or
+  no channel set up),
+* **green** -- alerts are on and the last scheduled sync was fine (or
+  none has run yet),
+* **orange** -- the last message could not be sent,
+* **red** -- the scheduled sync is faulty.
+
+The settings, and the remembered alert state, are saved in ``alerts.json`` in the same folder as
+``state.json`` (see below). Passwords are encrypted for the signed-in
+user with Windows DPAPI, so the file is useless on another account or
+computer; on other systems they are only base64-obfuscated and the file
+is made readable by its owner only.
+
 Scan cache and saved state
 --------------------------
 
@@ -166,3 +259,16 @@ be tested and reused on its own.
 .. autofunction:: haloviewer.halosync.get_config_path
 .. autofunction:: haloviewer.halosync.save_state
 .. autofunction:: haloviewer.halosync.load_state
+.. autoclass:: haloviewer.halosync.AlertConfig
+.. autoclass:: haloviewer.halosync.AlertState
+.. autofunction:: haloviewer.halosync.sync_is_faulty
+.. autofunction:: haloviewer.halosync.next_message
+.. autofunction:: haloviewer.halosync.mark_sent
+.. autofunction:: haloviewer.halosync.alerts_configured
+.. autofunction:: haloviewer.halosync.email_missing
+.. autofunction:: haloviewer.halosync.build_alert_message
+.. autofunction:: haloviewer.halosync.smtp_send_test
+.. autofunction:: haloviewer.halosync.send_email
+.. autofunction:: haloviewer.halosync.save_alert_config
+.. autofunction:: haloviewer.halosync.load_alert_config
+.. autofunction:: haloviewer.halosync.load_alert_state

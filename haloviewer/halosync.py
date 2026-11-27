@@ -97,6 +97,25 @@ Important assumptions (please check these match your setup):
     next sync. One minute before it elapses, a scan is triggered
     automatically so the sync starts with an up-to-date file list.
 
+11. Alerts ("enable alerts" tick-box and "alert setup..." button in the
+    Sync frame): after every *scheduled* sync, the number and size of
+    the files actually copied are compared with the thresholds set in
+    the alert setup dialog (default: fewer than 2 files or less than
+    1 kB -> alert; 0 switches a threshold off). By default an alert is
+    sent only once when the sync turns faulty, and a "recovered" message
+    once it works again; this state is remembered in alerts.json and
+    reset by switching alerts off/on. Optional "canary" all-clear
+    messages after unremarkable syncs are sent at most once a day by
+    default. Messages go by email, either through any SMTP server or
+    through Gmail (with a Google app password). The tick-box is greyed
+    out while "sync every ... h" is not ticked or no alert channel is
+    completely configured; the bell next to it shows the alert state
+    (grey off, green OK, orange mail failed, red faulty; hover for
+    details). The settings are kept in alerts.json next to state.json;
+    passwords are encrypted for the signed-in Windows user (DPAPI) and
+    only obfuscated (base64, file readable only by the user) on other
+    systems.
+
 Anyone needing different groups/prefixes or a different "current file"
 criterion can most easily adjust GROUPS above, or extract_timestamp() /
 classify_subgroup(), accordingly.
@@ -106,12 +125,19 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import json
+import base64
 import shutil
+import smtplib
+import socket
+import ssl
 import threading
 import queue
 import time
-from dataclasses import dataclass, field
+from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
+from dataclasses import dataclass, field, fields, asdict, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional
@@ -497,215 +523,662 @@ def load_state(path: Path) -> Optional[dict]:
 
 
 # --------------------------------------------------------------------------
+# Alerts (no GUI code): thresholds, messages, email via SMTP / Gmail
+# --------------------------------------------------------------------------
+
+ALERTS_VERSION = 1
+ALERTS_FILENAME = "alerts.json"
+
+EMAIL_MODES = ("smtp", "gmail")
+SMTP_SECURITY = ("STARTTLS", "SSL/TLS", "none")
+SMTP_DEFAULT_PORTS = {"STARTTLS": 587, "SSL/TLS": 465, "none": 25}
+SMTP_TIMEOUT_S = 20.0
+GMAIL_HOST = "smtp.gmail.com"
+GMAIL_PORT = 587
+GMAIL_SECURITY = "STARTTLS"
+
+# Prefixes of a stored password: how it was protected (see protect_secret)
+_SECRET_DPAPI = "dpapi:"
+_SECRET_B64 = "b64:"
+
+
+@dataclass
+class AlertConfig:
+    """All alert settings (what the alert setup dialog edits, plus the
+    "enable alerts" tick-box). Thresholds of 0 are switched off."""
+    enabled: bool = False          # "enable alerts" tick-box in the Sync frame
+    min_files: int = 2             # alert if fewer files were copied
+    min_kb: int = 1                # alert if less data (kB = 1024 bytes) was copied
+    canary: bool = False           # also send an all-clear after unremarkable syncs
+    canary_daily: bool = True      # ... but at most one per (calendar) day
+    alert_once: bool = True        # alert only when the sync turns faulty, not
+                                   # again until it has worked once more
+    via_email: bool = False
+    email_mode: str = "smtp"       # "smtp" or "gmail"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_security: str = "STARTTLS"
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_sender: str = ""          # empty: use smtp_user
+    gmail_address: str = ""
+    gmail_password: str = ""       # a Google *app* password
+    recipients: str = ""           # comma/semicolon/space separated
+
+
+_SECRET_FIELDS = ("smtp_password", "gmail_password")
+
+
+def parse_recipients(text: str) -> List[str]:
+    """Splits a list of addresses separated by commas, semicolons or
+    whitespace."""
+    return [a for a in re.split(r"[,;\s]+", text or "") if a]
+
+
+def email_settings(cfg: AlertConfig) -> dict:
+    """The effective connection data for the selected email mode:
+    host, port, security, user, password, sender, recipients."""
+    if cfg.email_mode == "gmail":
+        addr = cfg.gmail_address.strip()
+        return {"host": GMAIL_HOST, "port": GMAIL_PORT,
+                "security": GMAIL_SECURITY, "user": addr,
+                "password": cfg.gmail_password, "sender": addr,
+                "recipients": parse_recipients(cfg.recipients)}
+    user = cfg.smtp_user.strip()
+    return {"host": cfg.smtp_host.strip(), "port": int(cfg.smtp_port),
+            "security": cfg.smtp_security if cfg.smtp_security in SMTP_SECURITY
+            else "STARTTLS",
+            "user": user, "password": cfg.smtp_password,
+            "sender": cfg.smtp_sender.strip() or user,
+            "recipients": parse_recipients(cfg.recipients)}
+
+
+def email_missing(cfg: AlertConfig) -> List[str]:
+    """Names of the email settings that are still missing (empty list =
+    complete). For SMTP, login and password are optional (servers that
+    accept mail without authentication), the sender then must be given."""
+    s = email_settings(cfg)
+    missing = []
+    if cfg.email_mode == "gmail":
+        if "@" not in s["user"]:
+            missing.append("Gmail address")
+        if not s["password"]:
+            missing.append("app password")
+    else:
+        if not s["host"]:
+            missing.append("SMTP server")
+        if not 0 < s["port"] < 65536:
+            missing.append("port")
+        if "@" not in s["sender"]:
+            missing.append("sender address (From)")
+        if s["user"] and not s["password"]:
+            missing.append("password")
+    if not s["recipients"]:
+        missing.append("recipient (Send to)")
+    return missing
+
+
+def alerts_configured(cfg: AlertConfig) -> bool:
+    """True if alerts could actually be sent: at least one channel is
+    switched on and completely set up, and there is something to send
+    (a threshold or canary messages)."""
+    if not (cfg.min_files > 0 or cfg.min_kb > 0 or cfg.canary):
+        return False
+    return cfg.via_email and not email_missing(cfg)
+
+
+@dataclass
+class AlertState:
+    """What alerting remembers between scheduled syncs (and program
+    starts): whether the sync is currently faulty, whether an alert has
+    already gone out for that, and when the last canary was sent."""
+    faulty_since: str = ""         # ISO time of the first faulty sync, "" = OK
+    alert_sent: bool = False       # an alert went out for the current faulty spell
+    last_canary: str = ""          # ISO date of the last canary/recovery message
+
+
+def sync_is_faulty(cfg: AlertConfig, files: int, nbytes: int) -> bool:
+    """True if a scheduled sync that copied `files` files with `nbytes`
+    bytes falls below one of the (non-zero) thresholds."""
+    if cfg.min_files > 0 and files < cfg.min_files:
+        return True
+    return cfg.min_kb > 0 and nbytes < cfg.min_kb * 1024
+
+
+def next_message(cfg: AlertConfig, state: AlertState, faulty: bool,
+                 now: Optional[datetime] = None):
+    """Decides what to send after a scheduled sync and how the remembered
+    state changes. Returns ``(kind, new_state)`` with kind one of
+    "alert", "recovered", "canary" or None.
+
+    * faulty: "alert" -- with ``alert_once`` only if no alert has been
+      sent yet for this faulty spell;
+    * first good sync after an alert was sent: "recovered";
+    * otherwise good: "canary" if canaries are on (with ``canary_daily``
+      only if none was sent today yet).
+
+    The state returned only records the sync itself; call mark_sent()
+    once the message has actually been sent, so a message that could
+    not be sent is tried again after the next sync."""
+    now = now or datetime.now()
+    s = replace(state)
+    if faulty:
+        if not s.faulty_since:
+            s.faulty_since = now.isoformat(timespec="seconds")
+            s.alert_sent = False
+        if cfg.alert_once and s.alert_sent:
+            return None, s
+        return "alert", s
+    was_alerted = bool(s.faulty_since) and s.alert_sent
+    s.faulty_since, s.alert_sent = "", False
+    if was_alerted:
+        return "recovered", s
+    if cfg.canary and not (cfg.canary_daily
+                           and s.last_canary == now.date().isoformat()):
+        return "canary", s
+    return None, s
+
+
+def mark_sent(state: AlertState, kind: str,
+              now: Optional[datetime] = None) -> AlertState:
+    """The state after a message of `kind` was sent successfully. A
+    recovery message counts as the day's canary."""
+    now = now or datetime.now()
+    s = replace(state)
+    if kind == "alert" and s.faulty_since:
+        s.alert_sent = True
+    elif kind in ("canary", "recovered"):
+        s.last_canary = now.date().isoformat()
+    return s
+
+
+def _fmt_iso(text: str) -> str:
+    try:
+        return datetime.fromisoformat(text).strftime("%d.%m.%Y %H:%M")
+    except (TypeError, ValueError):
+        return text or "-"
+
+
+def build_alert_message(cfg: AlertConfig, kind: str, files: int, nbytes: int,
+                        source: str = "", dest: str = "", note: str = "",
+                        errors: Optional[List[str]] = None,
+                        when: Optional[datetime] = None,
+                        faulty_since: str = "") -> EmailMessage:
+    """Builds the email for an alert (kind="alert"), the all-clear after
+    an alert (kind="recovered"), a canary message (kind="canary") or a
+    test message (kind="test"). `faulty_since` (ISO time) is the start
+    of the faulty spell, for "alert" and "recovered"."""
+    s = email_settings(cfg)
+    when = when or datetime.now()
+    host = socket.gethostname()
+    amount = f"{human_size(nbytes)} in {files} file{'s' if files != 1 else ''}"
+    if kind == "alert":
+        subject = f"[halosync] ALERT on {host}: only {amount} synchronised"
+        head = "halosync ALERT: the last scheduled sync copied too little data."
+    elif kind == "recovered":
+        subject = f"[halosync] RECOVERED on {host}: {amount} synchronised"
+        head = ("halosync: the scheduled sync works again "
+                f"(faulty since {_fmt_iso(faulty_since)}).")
+    elif kind == "canary":
+        subject = f"[halosync] OK on {host}: {amount} synchronised"
+        head = f"halosync canary: no alert -- {amount} synchronised."
+    else:
+        subject = f"[halosync] test message from {host}"
+        head = ("This is a test message from halosync: alert messages from "
+                "this computer reach you.")
+    crit = []
+    if cfg.min_files > 0:
+        crit.append(f"fewer than {cfg.min_files} files")
+    if cfg.min_kb > 0:
+        crit.append(f"less than {cfg.min_kb} kB")
+    lines = [
+        head, "",
+        f"Time:         {when.strftime('%d.%m.%Y %H:%M:%S')}",
+        f"Computer:     {host}",
+    ]
+    if kind == "test":
+        once = ("once per faulty spell, then RECOVERED" if cfg.alert_once
+                else "after every faulty sync")
+        canary = (("at most once a day" if cfg.canary_daily
+                   else "after every good sync") if cfg.canary else "off")
+        lines += [
+            f"Mail server:  {s['host']}:{s['port']} ({s['security']})",
+            f"Sender:       {s['sender']}",
+            f"Alert if:     {' or '.join(crit) if crit else '(no thresholds)'}",
+            f"Alerts:       {once}",
+            f"Canary:       {canary}",
+        ]
+    else:
+        lines += [
+            f"Source:       {source or '-'}",
+            f"Destination:  {dest or '-'}",
+            f"Copied:       {amount} ({nbytes} bytes)",
+            f"Alert if:     {' or '.join(crit) if crit else '(no thresholds)'}",
+        ]
+    if note:
+        lines.append(f"Note:         {note}")
+    if kind == "alert" and faulty_since:
+        lines.append(f"Faulty since: {_fmt_iso(faulty_since)}")
+    if kind == "alert" and cfg.alert_once:
+        lines += ["", "No further alerts will be sent until a scheduled sync "
+                      "works again (you will then get a RECOVERED message)."]
+    if kind == "canary" and cfg.canary_daily:
+        lines += ["", "Canary messages are sent at most once a day."]
+    if errors:
+        lines += ["", f"Errors ({len(errors)}):"]
+        lines += [f"  {e}" for e in errors[:20]]
+        if len(errors) > 20:
+            lines.append(f"  ... and {len(errors) - 20} more")
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = s["sender"]
+    msg["To"] = ", ".join(s["recipients"])
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain=host or None)
+    msg.set_content("\n".join(lines) + "\n")
+    return msg
+
+
+def _smtp_open(s: dict, timeout: float = SMTP_TIMEOUT_S) -> smtplib.SMTP:
+    """Connects (and, where given, logs in) according to email_settings().
+    Raises smtplib.SMTPException / OSError on failure."""
+    ctx = ssl.create_default_context()
+    if s["security"] == "SSL/TLS":
+        conn = smtplib.SMTP_SSL(s["host"], s["port"], timeout=timeout, context=ctx)
+    else:
+        conn = smtplib.SMTP(s["host"], s["port"], timeout=timeout)
+    try:
+        conn.ehlo()
+        if s["security"] == "STARTTLS":
+            conn.starttls(context=ctx)
+            conn.ehlo()
+        if s["user"]:
+            conn.login(s["user"], s["password"])
+    except BaseException:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
+    return conn
+
+
+def send_email(cfg: AlertConfig, msg: EmailMessage,
+               timeout: float = SMTP_TIMEOUT_S) -> dict:
+    """Sends msg with the configured settings; raises on failure (also
+    if the server refuses every recipient). Returns the recipients the
+    server refused, as {address: (code, response)} (empty if none)."""
+    s = email_settings(cfg)
+    conn = _smtp_open(s, timeout)
+    try:
+        return conn.send_message(msg, from_addr=s["sender"],
+                                 to_addrs=s["recipients"]) or {}
+    finally:
+        try:
+            conn.quit()
+        except Exception:
+            pass
+
+
+def smtp_send_test(cfg: AlertConfig, timeout: float = SMTP_TIMEOUT_S) -> str:
+    """Sends a test message (build_alert_message kind "test") with the
+    given settings. Returns a short success text; raises (readable via
+    describe_error) on failure. The server accepting the message does
+    not guarantee delivery -- it may still bounce or land in a spam
+    folder."""
+    missing = email_missing(cfg)
+    if missing:
+        raise ValueError("missing: " + ", ".join(missing))
+    s = email_settings(cfg)
+    refused = send_email(cfg, build_alert_message(cfg, "test", 0, 0), timeout)
+    sent_to = [r for r in s["recipients"] if r not in refused]
+    text = f"test mail sent to {', '.join(sent_to)} via {s['host']}:{s['port']}"
+    if refused:
+        text += f"; REFUSED: {', '.join(refused)}"
+    return text + " -- check the inbox (and the spam folder)"
+
+
+def describe_error(exc: BaseException) -> str:
+    """A one-line, human readable description of an SMTP/network error."""
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        return "login refused (check user name/password; Gmail needs an app password)"
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        r = ", ".join(exc.recipients) if exc.recipients else ""
+        return f"recipient refused: {r}"
+    if isinstance(exc, smtplib.SMTPSenderRefused):
+        return f"sender refused: {exc.sender}"
+    if isinstance(exc, smtplib.SMTPNotSupportedError):
+        return f"not supported by the server: {exc}"
+    if isinstance(exc, ssl.SSLError):
+        return f"encryption failed ({exc.reason or exc}); check port/encryption"
+    if isinstance(exc, socket.timeout):
+        return "connection timed out"
+    if isinstance(exc, socket.gaierror):
+        return "server name not found"
+    if isinstance(exc, ConnectionRefusedError):
+        return "connection refused (wrong server or port?)"
+    if isinstance(exc, smtplib.SMTPResponseException):
+        text = exc.smtp_error.decode("utf-8", "replace") \
+            if isinstance(exc.smtp_error, bytes) else str(exc.smtp_error)
+        return f"server answered {exc.smtp_code}: {text}"
+    return str(exc) or exc.__class__.__name__
+
+
+# -- Password protection ---------------------------------------------------
+
+def _dpapi(data: bytes, protect: bool) -> bytes:
+    """Windows DPAPI (CryptProtectData/CryptUnprotectData) via ctypes:
+    the result can only be decrypted by the same Windows user."""
+    import ctypes
+    from ctypes import wintypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+    buf = ctypes.create_string_buffer(data, len(data))
+    blob_in = DATA_BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    blob_out = DATA_BLOB()
+    CRYPTPROTECT_UI_FORBIDDEN = 0x1
+    if protect:
+        ok = crypt32.CryptProtectData(
+            ctypes.byref(blob_in), ctypes.c_wchar_p("halosync"), None, None,
+            None, CRYPTPROTECT_UI_FORBIDDEN, ctypes.byref(blob_out))
+    else:
+        ok = crypt32.CryptUnprotectData(
+            ctypes.byref(blob_in), None, None, None, None,
+            CRYPTPROTECT_UI_FORBIDDEN, ctypes.byref(blob_out))
+    if not ok:
+        raise OSError("DPAPI call failed")
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        kernel32.LocalFree(blob_out.pbData)
+
+
+def protect_secret(text: str) -> str:
+    """Encodes a password for alerts.json: DPAPI-encrypted on Windows,
+    otherwise only base64-obfuscated (the file itself is then made
+    readable by the user only)."""
+    if not text:
+        return ""
+    raw = text.encode("utf-8")
+    if sys.platform == "win32":
+        try:
+            return _SECRET_DPAPI + base64.b64encode(_dpapi(raw, True)).decode("ascii")
+        except Exception:
+            pass
+    return _SECRET_B64 + base64.b64encode(raw).decode("ascii")
+
+
+def unprotect_secret(text: str) -> str:
+    """Reverses protect_secret(); returns "" if it cannot be decoded
+    (e.g. a DPAPI value copied from another user or computer)."""
+    if not text:
+        return ""
+    try:
+        if text.startswith(_SECRET_DPAPI):
+            if sys.platform != "win32":
+                return ""
+            return _dpapi(base64.b64decode(text[len(_SECRET_DPAPI):]),
+                          False).decode("utf-8")
+        if text.startswith(_SECRET_B64):
+            return base64.b64decode(text[len(_SECRET_B64):]).decode("utf-8")
+    except Exception:
+        return ""
+    return ""
+
+
+# -- Persistence of the alert settings -------------------------------------
+
+def get_alerts_path() -> Path:
+    return get_config_dir() / ALERTS_FILENAME
+
+
+def save_alert_config(path: Path, cfg: AlertConfig,
+                      state: Optional[AlertState] = None) -> None:
+    """Writes the alert settings atomically as JSON, passwords protected
+    with protect_secret(), together with the remembered AlertState
+    (`state` None keeps the one already in the file)."""
+    data = asdict(cfg)
+    for k in _SECRET_FIELDS:
+        data[k] = protect_secret(data[k])
+    if state is None:
+        state = load_alert_state(path)
+    data["state"] = asdict(state)
+    data["version"] = ALERTS_VERSION
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1)
+    try:
+        os.chmod(tmp_path, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp_path, path)
+
+
+def load_alert_state(path: Path) -> AlertState:
+    """The AlertState remembered in alerts.json (defaults if none)."""
+    st = AlertState()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        saved = data.get("state") if data.get("version") == ALERTS_VERSION else None
+    except (OSError, ValueError, AttributeError):
+        return st
+    if not isinstance(saved, dict):
+        return st
+    for fld in fields(AlertState):
+        val = saved.get(fld.name)
+        if isinstance(val, type(getattr(st, fld.name))):
+            setattr(st, fld.name, val)
+    return st
+
+
+def load_alert_config(path: Path) -> AlertConfig:
+    """Reads alerts.json; missing, unreadable or incompatible files give
+    the defaults, unknown or ill-typed entries are ignored."""
+    cfg = AlertConfig()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return cfg
+    if not isinstance(data, dict) or data.get("version") != ALERTS_VERSION:
+        return cfg
+    for fld in fields(AlertConfig):
+        if fld.name not in data:
+            continue
+        val = data[fld.name]
+        default = getattr(cfg, fld.name)
+        if fld.name in _SECRET_FIELDS:
+            val = unprotect_secret(val) if isinstance(val, str) else ""
+        if isinstance(default, bool):
+            if not isinstance(val, bool):
+                continue
+        elif isinstance(default, int):
+            if isinstance(val, bool) or not isinstance(val, int) or val < 0:
+                continue
+        elif not isinstance(val, str):
+            continue
+        setattr(cfg, fld.name, val)
+    if cfg.email_mode not in EMAIL_MODES:
+        cfg.email_mode = "smtp"
+    if cfg.smtp_security not in SMTP_SECURITY:
+        cfg.smtp_security = "STARTTLS"
+    return cfg
+
+
+# --------------------------------------------------------------------------
 # GUI
 # --------------------------------------------------------------------------
 
-# Photo of the lidar instrument (120x160 PNG), base64-embedded so the
-# script stays a single file and does not depend on an image in the
-# working directory. tk.PhotoImage can load PNG directly since Tk 8.6, so
-# no Pillow/extra installation is needed.
-LIDAR_PHOTO_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAHgAAACgCAMAAADw11iiAAABhWlDQ1BJQ0MgcHJvZmlsZQAAKJF9kb9Lw0AcxV9bxV8tgnYQ"
-    "cchQnexiRRxrFYpQIdQKrTqYXPoLmjQkKS6OgmvBwR+LVQcXZ10dXAVB8AeIf4A4KbpIid9LCi1iPDjuw7t7j7t3gL9RYarZ"
-    "FQdUzTLSyYSQza0KPa/owxAGEEJMYqY+J4opeI6ve/j4ehflWd7n/hwhJW8ywCcQx5luWMQbxDObls55nzjMSpJCfE48adAF"
-    "iR+5Lrv8xrnosJ9nho1Mep44TCwUO1juYFYyVOJp4oiiapTvz7qscN7irFZqrHVP/sJgXltZ5jrNMSSxiCWIECCjhjIqsBCl"
-    "VSPFRJr2Ex7+UccvkksmVxmMHAuoQoXk+MH/4He3ZiE25SYFE0D3i21/jAM9u0Czbtvfx7bdPAECz8CV1vZXG8DsJ+n1thY5"
-    "Aga3gYvrtibvAZc7wMiTLhmSIwVo+gsF4P2MvikHDN8C/Wtub619nD4AGeoqdQMcHAITRcpe93h3b2dv/55p9fcDoYFyuTbP"
-    "IuAAAAL9UExURQAAAAgECwEHChIGDhAIBgkOAQUPMA4RDQ4RFRAVAA8ZARgWBDYNCRQZIAYaShgbFCEZFRYfAhkcHB4bHh4f"
-    "BSgbEBofJxskAyQiAx0jEx8oASgmASAlLCUkJiUlHgcuKVgZDh8pOjAmKGcaBS8tCBUuXycwBywsJSgsNCwsLCcwHSszFSw2"
-    "Ag09ODIyM04rIQ0+Pjo0GTs0JUgzBD4yPT4zNTY2Lzs4Byw3SjM2Pio5PjQ9FTk5Nzg5PD47FzY/Cjc9KzhBARVDiY8pDTxE"
-    "AEM/QT9BOVE7Pz5BQDxBSjhCUzVDWFU+PkBKFk1DPkJLC0dJGEZINVNDR1dCRjpJXlJFOUtGSEdKKUZIR0VOBDhKZD5JWoE5"
-    "JEJJU0dJQXg+OWZEPF1MBz9PZ1lNIUVQYUhQXFBPTU9PUktQV19ONF9OS1tPUlFZDlFYGlZTTFJYJlVWQ1ZXNmFTRlVdAk1X"
-    "aFBXYlVXWldXVVlfAMo+F5VQJFleaV1eYWJdW11fW2dcWmddY15mHF9nEG9cXFZidbpKImNpB1xkXG5gU2NmNXBjO55VOola"
-    "V2FmcWVmY29jYmRrLJBbSWplYmVmaWlpVWxqSHZqaHFsaWxuam51F2lwaHB2Cm51JIBqa2RxhIBtTodsSHBwc2xxe3xvYHR0"
-    "RdJaJn5ySIVwSnV0cn1ycHh0bYZ4eoh7Vn97fHp9e32EJJd5SoGFEtdnO3t+iYt+UJOAKZZ7W4OCVYiEK5J9WpF9Y4Z/eIx+"
-    "boSBaLhyW4CBeHaClYKGSIeGOspyS4ODjJGDXY+BhIKEk4WFhH+Gj5CHT+VyNet1LIeMm5CUHYiNlY6Ni5iKjJyMZ4yOkZOQ"
-    "YqaKa5SWN5SQiJ2Pfp6Qc/R/NI+WpZaWlpGXn/ODRKCiJPGGV5uen62ceJafraKdnpmgqK2ega6eiqWgmaCnsKanqqmnpbGt"
-    "q62usbqtmq2wrbWvp6uxu7ytrrW2ub2/xci+rcTEwcbIzdTT1eXi4+7r6/j1+vv29PX49P358DACth4AACAASURBVHjajZwP"
-    "TNP33u+788womBOGeIYwIbmGFFlJb/SxcLgtlCW2wHnsH0ooNQvNTjZ+rf0DbV3bJW0pRcMD5raQllJ6YCKUKDAKj2HXqWDc"
-    "zNS6RO1kTszpcoOHqePPtnPwUfGZyX1/f7+iuLObez/2P/T3+n7+fj+fX4uskt1cgbpaXF0tEFeqBdzK6upqkzgYHDY1d5uD"
-    "eFJnrjN31NWZzcPBajMjdXXVteQHxyAd5mPBoMkU7DDjp3jWhB93kJchh44FzeJqNX5w6BD53WPm6lqLpT025XAMTbEE6loz"
-    "3tdhMVWLK7lYhUBsxtMOc63FbO6wqMvLxdXmary5qQPLqCbYOrFYzDw2dzTVVZs7mPWQI2NN9Ovkt+gXyvGr5MEhc0fHsUOH"
-    "ak0WS6Pv3502Kyt4LDgcBMqMhQt2E3BRUrOOYDDYATAOpVabqnFMcTlMY66rLqdFjGOZX4DMx3BbzYi521RXTZPNeLeJ3L+P"
-    "n9YegqHUJlOj3ed0sszJBePXg+rduwsE3CJaLbxKTAhLmbpNoZC7GpqDViSuToLF5WK4Abf0wfDuDpNJrSbGUKtDjbSTzGZT"
-    "OTH9IXpp1dXU4BBkCnLtGousUAy1TOXVZjF3p8AEGpYLa1eDhWdmi0lq17dbiCuTLi4iCzCBaLo4MjgRjY5enI7FrsS/u3b9"
-    "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"
+# HaloViewer logo (128x128 PNG, scaled down from docs/images/
+# haloviewer_logo.png), base64-embedded so the script stays a single file
+# and does not depend on an image in the working directory. tk.PhotoImage
+# can load PNG (with transparency) directly since Tk 8.6, so no
+# Pillow/extra installation is needed. Also used as the window icon.
+HALOVIEWER_LOGO_B64 = (
+    "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"
 )
 
 
@@ -880,6 +1353,9 @@ class ProgressDialog(tk.Toplevel):
         self.total_bytes = max(sum(f.size for f in todo), 1)
         self.cancel_event = threading.Event()
         self.msg_queue: "queue.Queue" = queue.Queue()
+        # Filled by the worker thread, read only after its "done" message
+        self.copied_bytes = 0
+        self.errors: List[str] = []
 
         pad = {"padx": 12, "pady": 6}
         self.progress = ttk.Progressbar(self, orient="horizontal", length=420,
@@ -926,7 +1402,9 @@ class ProgressDialog(tk.Toplevel):
                     break
                 os.replace(tmp_path, dest_path)
                 copied += 1
+                self.copied_bytes += entry.size
             except OSError as exc:
+                self.errors.append(f"{entry.relpath}: {exc}")
                 self.msg_queue.put(("error", f"{entry.relpath}: {exc}", done_bytes))
                 try:
                     if tmp_path.exists():
@@ -953,11 +1431,395 @@ class ProgressDialog(tk.Toplevel):
                     self.progress["value"] = b
                     cancelled = self.cancel_event.is_set()
                     self.destroy()
-                    self.on_done(copied=a, cancelled=cancelled)
+                    self.on_done(copied=a, cancelled=cancelled,
+                                 copied_bytes=self.copied_bytes,
+                                 errors=list(self.errors))
                     return
         except queue.Empty:
             pass
         self.after(80, self._poll)
+
+
+def _run_in_background(widget, func, on_result, poll_ms: int = 100):
+    """Runs func() in a daemon thread and calls on_result(ok, value) in
+    the Tk main loop afterwards (value = return value or the exception).
+    Nothing is called if `widget` no longer exists by then."""
+    q: "queue.Queue" = queue.Queue()
+
+    def worker():
+        try:
+            q.put((True, func()))
+        except BaseException as exc:  # reported to the GUI, never raised here
+            q.put((False, exc))
+
+    def poll():
+        try:
+            ok, value = q.get_nowait()
+        except queue.Empty:
+            try:
+                widget.after(poll_ms, poll)
+            except tk.TclError:
+                pass
+            return
+        try:
+            if widget.winfo_exists():
+                on_result(ok, value)
+        except tk.TclError:
+            pass
+
+    threading.Thread(target=worker, daemon=True).start()
+    widget.after(poll_ms, poll)
+
+
+class AlertSetupDialog(tk.Toplevel):
+    """Alert configuration: "General" tab (when to send what, through
+    which channel) and "Email" tab (SMTP server or Gmail)."""
+
+    def __init__(self, master, cfg: AlertConfig, on_save):
+        super().__init__(master)
+        self.title("Alert setup")
+        self.resizable(False, False)
+        self.transient(master)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.on_save = on_save
+        self._enabled = cfg.enabled  # the Sync-frame tick-box, not edited here
+
+        self.nb = ttk.Notebook(self)
+        self.nb.pack(fill="both", expand=True, padx=10, pady=(10, 0))
+        gen = ttk.Frame(self.nb, padding=12)
+        mail = ttk.Frame(self.nb, padding=12)
+        self.nb.add(gen, text="General")
+        self.nb.add(mail, text="Email")
+        self._build_general(gen, cfg)
+        self._build_email(mail, cfg)
+
+        btns = ttk.Frame(self, padding=(10, 8))
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._on_ok).pack(side="right", padx=(0, 6))
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+        self.nb.select(0)
+        self.grab_set()
+
+    # -- tabs ----------------------------------------------------------------
+    def _spinbox(self, parent, var, lo, hi, width=6):
+        vcmd = (self.register(lambda v: v == "" or v.isdigit()), "%P")
+        return ttk.Spinbox(parent, from_=lo, to=hi, increment=1, width=width,
+                           textvariable=var, validate="key", validatecommand=vcmd)
+
+    def _build_general(self, f, cfg: AlertConfig):
+        self.min_files_var = tk.StringVar(value=str(cfg.min_files))
+        self.min_kb_var = tk.StringVar(value=str(cfg.min_kb))
+        self.canary_var = tk.BooleanVar(value=cfg.canary)
+        self.canary_daily_var = tk.BooleanVar(value=cfg.canary_daily)
+        self.alert_once_var = tk.BooleanVar(value=cfg.alert_once)
+        self.via_email_var = tk.BooleanVar(value=cfg.via_email)
+
+        th = ttk.Frame(f)
+        th.grid(row=0, column=0, sticky="w")
+        ttk.Label(th, text="Send alert if fewer than").grid(row=0, column=0, sticky="w", pady=3)
+        self._spinbox(th, self.min_files_var, 0, 100000).grid(row=0, column=1, padx=6, pady=3)
+        ttk.Label(th, text="files synched").grid(row=0, column=2, sticky="w", pady=3)
+        ttk.Label(th, text="Send alert if less than").grid(row=1, column=0, sticky="w", pady=3)
+        self._spinbox(th, self.min_kb_var, 0, 10000000).grid(row=1, column=1, padx=6, pady=3)
+        ttk.Label(th, text="kB new data").grid(row=1, column=2, sticky="w", pady=3)
+
+        hint = dict(foreground="#555555", wraplength=380, justify="left")
+        ttk.Label(f, text="0 switches a threshold off. Checked after every scheduled "
+                          "sync (\"sync every ... h\").", **hint).grid(
+            row=1, column=0, sticky="w", pady=(2, 8))
+
+        ttk.Checkbutton(f, text="Send an alert only once when the sync turns faulty",
+                        variable=self.alert_once_var).grid(row=2, column=0, sticky="w")
+        ttk.Label(f, text="no further alerts until a scheduled sync works again; "
+                          "then a \"recovered\" message is sent",
+                  **hint).grid(row=3, column=0, sticky="w", padx=(22, 0), pady=(0, 8))
+
+        ttk.Checkbutton(f, text="Send canary messages", variable=self.canary_var,
+                        command=self._canary_changed).grid(row=4, column=0, sticky="w")
+        ttk.Label(f, text="\"no alert: ... kB in ... files synched\" after a "
+                          "scheduled sync without alert, so you know alerting works",
+                  **hint).grid(row=5, column=0, sticky="w", padx=(22, 0))
+        self.canary_daily_chk = ttk.Checkbutton(
+            f, text="only once a day", variable=self.canary_daily_var)
+        self.canary_daily_chk.grid(row=6, column=0, sticky="w", padx=(22, 0), pady=(2, 8))
+
+        ttk.Checkbutton(f, text="Send via email", variable=self.via_email_var).grid(
+            row=7, column=0, sticky="w")
+        ttk.Label(f, text="set up on the \"Email\" tab", **hint).grid(
+            row=8, column=0, sticky="w", padx=(22, 0))
+        self._canary_changed()
+
+    def _canary_changed(self):
+        self.canary_daily_chk.state(["!disabled"] if self.canary_var.get()
+                                    else ["disabled"])
+
+    def _build_email(self, f, cfg: AlertConfig):
+        self.mode_var = tk.StringVar(value=cfg.email_mode)
+        self.host_var = tk.StringVar(value=cfg.smtp_host)
+        self.port_var = tk.StringVar(value=str(cfg.smtp_port))
+        self.security_var = tk.StringVar(value=cfg.smtp_security)
+        self.user_var = tk.StringVar(value=cfg.smtp_user)
+        self.password_var = tk.StringVar(value=cfg.smtp_password)
+        self.sender_var = tk.StringVar(value=cfg.smtp_sender)
+        self.gmail_var = tk.StringVar(value=cfg.gmail_address)
+        self.gmail_pw_var = tk.StringVar(value=cfg.gmail_password)
+        self.recipients_var = tk.StringVar(value=cfg.recipients)
+        self._last_security = cfg.smtp_security
+
+        f.columnconfigure(0, weight=1)
+        ttk.Radiobutton(f, text="SMTP server", value="smtp", variable=self.mode_var,
+                        command=self._mode_changed).grid(row=0, column=0, sticky="w")
+        self.smtp_frame = ttk.Frame(f, padding=(22, 4, 0, 8))
+        self.smtp_frame.grid(row=1, column=0, sticky="ew")
+        sf = self.smtp_frame
+        sf.columnconfigure(1, weight=1)
+        ttk.Label(sf, text="Server").grid(padx=(0, 8), row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(sf, textvariable=self.host_var, width=30).grid(
+            row=0, column=1, columnspan=3, sticky="ew", pady=2)
+        ttk.Label(sf, text="Port").grid(padx=(0, 8), row=1, column=0, sticky="w", pady=2)
+        self._spinbox(sf, self.port_var, 1, 65535).grid(row=1, column=1, sticky="w", pady=2)
+        ttk.Label(sf, text="Encryption").grid(row=1, column=2, sticky="e", padx=(8, 4), pady=2)
+        sec = ttk.Combobox(sf, textvariable=self.security_var, values=SMTP_SECURITY,
+                           state="readonly", width=9)
+        sec.grid(row=1, column=3, sticky="e", pady=2)
+        sec.bind("<<ComboboxSelected>>", self._security_changed)
+        ttk.Label(sf, text="Login").grid(padx=(0, 8), row=2, column=0, sticky="w", pady=2)
+        ttk.Entry(sf, textvariable=self.user_var).grid(
+            row=2, column=1, columnspan=3, sticky="ew", pady=2)
+        ttk.Label(sf, text="Password").grid(padx=(0, 8), row=3, column=0, sticky="w", pady=2)
+        ttk.Entry(sf, textvariable=self.password_var, show="•").grid(
+            row=3, column=1, columnspan=3, sticky="ew", pady=2)
+        ttk.Label(sf, text="From").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=2)
+        ttk.Entry(sf, textvariable=self.sender_var).grid(
+            row=4, column=1, columnspan=3, sticky="ew", pady=2)
+        ttk.Label(sf, text="empty = login; leave login empty if the server needs none",
+                  foreground="#555555").grid(row=5, column=1, columnspan=3, sticky="w")
+
+        ttk.Radiobutton(f, text="Gmail", value="gmail", variable=self.mode_var,
+                        command=self._mode_changed).grid(row=2, column=0, sticky="w")
+        self.gmail_frame = ttk.Frame(f, padding=(22, 4, 0, 8))
+        self.gmail_frame.grid(row=3, column=0, sticky="ew")
+        gf = self.gmail_frame
+        gf.columnconfigure(1, weight=1)
+        ttk.Label(gf, text="Gmail address").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
+        ttk.Entry(gf, textvariable=self.gmail_var).grid(row=0, column=1, sticky="ew", pady=2)
+        ttk.Label(gf, text="App password").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=2)
+        ttk.Entry(gf, textvariable=self.gmail_pw_var, show="•").grid(
+            row=1, column=1, sticky="ew", pady=2)
+        ttk.Label(gf, text="Needs 2-step verification and an app password (Google "
+                           "account → Security → App passwords); the normal "
+                           "Google password is refused.",
+                  foreground="#555555", wraplength=330, justify="left").grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+        ttk.Separator(f).grid(row=4, column=0, sticky="ew", pady=6)
+        rf = ttk.Frame(f)
+        rf.grid(row=5, column=0, sticky="ew")
+        rf.columnconfigure(1, weight=1)
+        ttk.Label(rf, text="Send to").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Entry(rf, textvariable=self.recipients_var).grid(row=0, column=1, sticky="ew")
+        ttk.Label(rf, text="several addresses separated by commas",
+                  foreground="#555555").grid(row=1, column=1, sticky="w")
+
+        tf = ttk.Frame(f)
+        tf.grid(row=6, column=0, sticky="ew", pady=(10, 0))
+        self.test_btn = ttk.Button(tf, text="Send test mail", command=self._test_connection)
+        self.test_btn.pack(side="left", anchor="n")
+        self.test_label = tk.Label(tf, text="", anchor="w", justify="left", wraplength=260)
+        self.test_label.pack(side="left", fill="x", padx=(8, 0))
+
+        self._mode_changed()
+
+    # -- behaviour -----------------------------------------------------------
+    @staticmethod
+    def _set_frame_state(frame, enabled: bool):
+        for w in frame.winfo_children():
+            try:
+                w.state(["!disabled"] if enabled else ["disabled"])
+            except (AttributeError, tk.TclError):
+                pass
+
+    def _mode_changed(self):
+        smtp = self.mode_var.get() != "gmail"
+        self._set_frame_state(self.smtp_frame, smtp)
+        self._set_frame_state(self.gmail_frame, not smtp)
+        self.test_label.configure(text="")
+
+    def _security_changed(self, _event=None):
+        """Follow the port to the usual one of the chosen encryption, unless
+        the user had typed a non-standard port."""
+        new = self.security_var.get()
+        if self.port_var.get().strip() in ("", str(SMTP_DEFAULT_PORTS.get(self._last_security))):
+            self.port_var.set(str(SMTP_DEFAULT_PORTS.get(new, 587)))
+        self._last_security = new
+
+    def _int(self, var, name, lo=0, hi=None) -> int:
+        text = var.get().strip()
+        try:
+            v = int(text)
+        except ValueError:
+            raise ValueError(f"{name}: please enter a whole number") from None
+        if v < lo or (hi is not None and v > hi):
+            raise ValueError(f"{name}: must be between {lo} and {hi}" if hi is not None
+                             else f"{name}: must be at least {lo}")
+        return v
+
+    def _port(self) -> int:
+        """The SMTP port; in Gmail mode an invalid entry in the (then
+        inactive) SMTP fields must not block saving."""
+        try:
+            return self._int(self.port_var, "port", 1, 65535)
+        except ValueError:
+            if self.mode_var.get() == "gmail":
+                return 587
+            raise
+
+    def collect(self) -> AlertConfig:
+        """Current dialog contents as an AlertConfig (raises ValueError
+        for invalid numbers)."""
+        return AlertConfig(
+            enabled=self._enabled,
+            min_files=self._int(self.min_files_var, "files threshold"),
+            min_kb=self._int(self.min_kb_var, "kB threshold"),
+            canary=self.canary_var.get(),
+            canary_daily=self.canary_daily_var.get(),
+            alert_once=self.alert_once_var.get(),
+            via_email=self.via_email_var.get(),
+            email_mode="gmail" if self.mode_var.get() == "gmail" else "smtp",
+            smtp_host=self.host_var.get().strip(),
+            smtp_port=self._port(),
+            smtp_security=self.security_var.get(),
+            smtp_user=self.user_var.get().strip(),
+            smtp_password=self.password_var.get(),
+            smtp_sender=self.sender_var.get().strip(),
+            gmail_address=self.gmail_var.get().strip(),
+            gmail_password=self.gmail_pw_var.get(),
+            recipients=self.recipients_var.get().strip(),
+        )
+
+    def _test_connection(self):
+        try:
+            cfg = self.collect()
+        except ValueError as exc:
+            self.test_label.configure(text=f"✗ {exc}", fg="#c0392b")
+            return
+        missing = email_missing(cfg)
+        if missing:
+            self.test_label.configure(text="✗ missing: " + ", ".join(missing),
+                                      fg="#c0392b")
+            return
+        self.test_btn.state(["disabled"])
+        self.test_label.configure(text="sending ...", fg="#555555")
+
+        def done(ok, value):
+            self.test_btn.state(["!disabled"])
+            if ok:
+                self.test_label.configure(
+                    text=f"\u2713 {value}",
+                    fg="#b9770e" if "REFUSED" in value else "#1e8449")
+            else:
+                self.test_label.configure(text=f"✗ {describe_error(value)}",
+                                          fg="#c0392b")
+
+        _run_in_background(self, lambda: smtp_send_test(cfg), done)
+
+    def _on_ok(self):
+        try:
+            cfg = self.collect()
+        except ValueError as exc:
+            messagebox.showerror("Alert setup", str(exc), parent=self)
+            return
+        if cfg.via_email and email_missing(cfg):
+            messagebox.showwarning(
+                "Alert setup",
+                "The email settings are incomplete (missing: "
+                + ", ".join(email_missing(cfg))
+                + ").\n\nThe settings are saved, but alerts cannot be "
+                  "enabled until this is completed.", parent=self)
+        elif not cfg.via_email:
+            messagebox.showwarning(
+                "Alert setup",
+                "\"Send via email\" is not ticked, so there is no way to send "
+                "alerts.\n\nThe settings are saved, but alerts cannot be "
+                "enabled until a channel is chosen.", parent=self)
+        self.on_save(cfg)
+        self.destroy()
+
+
+class ToolTip:
+    """Minimal hover tooltip; the text is taken from a callable each time
+    it is shown, so it always describes the current state."""
+
+    def __init__(self, widget, text_func, delay_ms: int = 400):
+        self.widget = widget
+        self.text_func = text_func
+        self.delay_ms = delay_ms
+        self._after = None
+        self._tip = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._hide()
+        self._after = self.widget.after(self.delay_ms, self._show)
+
+    def _show(self):
+        self._after = None
+        text = self.text_func()
+        if not text:
+            return
+        x = self.widget.winfo_rootx() + 16
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self._tip = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        tk.Label(tw, text=text, justify="left", background="#ffffe0",
+                 relief="solid", borderwidth=1, padx=6, pady=3,
+                 wraplength=320).pack()
+
+    def _hide(self, _event=None):
+        if self._after is not None:
+            self.widget.after_cancel(self._after)
+            self._after = None
+        if self._tip is not None:
+            self._tip.destroy()
+            self._tip = None
+
+
+#: Colours of the alert status icon (see AlertIcon)
+ALERT_ICON_COLORS = {
+    "off": LIGHT_GREY,          # alerts not active
+    "ok": LIGHT_GREEN,          # active, last scheduled sync fine
+    "mailfail": LIGHT_ORANGE,   # active, but the last message could not be sent
+    "faulty": "#c0392b",        # the scheduled sync is faulty
+}
+
+
+class AlertIcon(tk.Canvas):
+    """A small bell in the colour of the alert state; crossed out when
+    alerts are not active."""
+
+    def __init__(self, parent, size: int = 20):
+        super().__init__(parent, width=size, height=size, highlightthickness=0)
+        k = size / 20.0
+        self._bell = self.create_polygon(
+            *[c * k for c in (10, 2, 15, 4, 15.5, 10, 18.5, 15, 1.5, 15,
+                              4.5, 10, 5, 4)],
+            smooth=True, fill=LIGHT_GREY, outline="#404040", width=1)
+        self._clapper = self.create_oval(8 * k, 15 * k, 12 * k, 19 * k,
+                                         fill="#404040", outline="")
+        self._slash = self.create_line(3 * k, 18 * k, 17 * k, 2 * k,
+                                       fill="#404040", width=2)
+        self.icon_state = None
+        self.set_state("off")
+
+    def set_state(self, state: str):
+        self.icon_state = state
+        self.itemconfigure(self._bell, fill=ALERT_ICON_COLORS.get(state, LIGHT_GREY))
+        self.itemconfigure(self._slash, state="normal" if state == "off" else "hidden")
 
 
 class LidarSyncApp:
@@ -1010,7 +1872,15 @@ class LidarSyncApp:
         self._schedule_prescan_done = False
         self._schedule_timer_handle: Optional[str] = None
 
+        # -- Alerts (checked after every scheduled sync) --
+        self.alert_cfg: AlertConfig = load_alert_config(get_alerts_path())
+        self.alert_state: AlertState = load_alert_state(get_alerts_path())
+        self._alert_send_failed = ""  # error text of the last failed message
+        self.alerts_var = tk.BooleanVar(value=self.alert_cfg.enabled)
+        self._scheduled_run = False  # the running sync was started by the schedule
+
         self._build_ui()
+        self._update_alert_controls()
         self._load_persisted_state()
 
     # -- UI construction ---------------------------------------------------
@@ -1035,10 +1905,14 @@ class LidarSyncApp:
         mid = tk.Frame(main)
         mid.grid(row=0, column=1, sticky="ns", padx=6)
 
-        # Photo of the lidar instrument, fixed at the top centre (not part
-        # of the centred button cluster below, hence before the top spacer).
-        self._lidar_photo = tk.PhotoImage(data=LIDAR_PHOTO_B64)
-        tk.Label(mid, image=self._lidar_photo).pack(pady=(0, 10))
+        # HaloViewer logo, fixed at the top centre (not part of the
+        # centred button cluster below, hence before the top spacer).
+        self._logo = tk.PhotoImage(data=HALOVIEWER_LOGO_B64)
+        tk.Label(mid, image=self._logo).pack(pady=(0, 10))
+        try:
+            self.root.iconphoto(True, self._logo)
+        except tk.TclError:
+            pass
 
         tk.Frame(mid).pack(expand=True)  # top spacer
 
@@ -1091,6 +1965,24 @@ class LidarSyncApp:
         self.countdown_label = tk.Label(sync_frame, text="", fg="#555555",
                                          wraplength=140, justify="center")
         self.countdown_label.pack(pady=(2, 0))
+
+        alert_frame = tk.Frame(sync_frame)
+        alert_frame.pack(anchor="w", pady=(10, 0))
+        alert_row = tk.Frame(alert_frame)
+        alert_row.pack(anchor="w")
+        self.alerts_chk = tk.Checkbutton(alert_row, text="enable alerts",
+                                         variable=self.alerts_var,
+                                         command=self._on_alerts_toggle)
+        self.alerts_chk.pack(side="left")
+        self.alert_icon = AlertIcon(alert_row)
+        self.alert_icon.pack(side="left", padx=(4, 0))
+        ToolTip(self.alert_icon, self._alert_icon_text)
+        self.alert_setup_btn = tk.Button(alert_frame, text="alert setup\u2026",
+                                         command=self._open_alert_setup)
+        self.alert_setup_btn.pack(anchor="w", padx=(4, 0), pady=(2, 0))
+        self.alert_status_label = tk.Label(sync_frame, text="", fg="#555555",
+                                           wraplength=140, justify="center")
+        self.alert_status_label.pack(pady=(2, 0))
 
         self.sync_status_label = tk.Label(sync_frame, text="", fg="#555555",
                                            wraplength=140, justify="center")
@@ -1293,13 +2185,19 @@ class LidarSyncApp:
         ProgressDialog(self.root, list(self.pending_transfer), self.source_root,
                        self.dest_root, on_done=self._on_sync_done)
 
-    def _on_sync_done(self, copied: int, cancelled: bool):
+    def _on_sync_done(self, copied: int, cancelled: bool, copied_bytes: int = 0,
+                      errors: Optional[List[str]] = None):
         self.copy_current_var.set(False)
         self.copy_everything_var.set(False)
         if cancelled:
             self.sync_status_label.configure(text=f"Cancelled ({copied} files copied)")
         else:
             self.sync_status_label.configure(text=f"Done ({copied} files copied)")
+        if self._scheduled_run:
+            self._scheduled_run = False
+            self._check_alerts(copied, copied_bytes,
+                               note="sync was cancelled" if cancelled else "",
+                               errors=errors)
         self._trigger_rescan()
 
     # -- Scheduled sync ("sync every ... h") ---------------------------------------------------
@@ -1328,6 +2226,7 @@ class LidarSyncApp:
             self._arm_schedule(self._current_interval_hours())
         else:
             self._stop_schedule()
+        self._update_alert_controls()
 
     def _on_interval_changed(self, *_args):
         if self.sync_schedule_var.get():
@@ -1376,15 +2275,158 @@ class LidarSyncApp:
         self._schedule_timer_handle = self.root.after(60000, self._update_countdown)
 
     def _perform_scheduled_sync(self):
-        if self.pending_transfer:
+        if self.pending_transfer and self.source_root is not None \
+                and self.dest_root is not None:
+            self._scheduled_run = True
             self._start_sync()
         else:
             self.sync_status_label.configure(text="Schedule: nothing to transfer")
+            self._check_alerts(0, 0, note=self._nothing_to_transfer_reason())
         if self.sync_schedule_var.get():
             self._arm_schedule(self._current_interval_hours())
         else:
             self.countdown_label.configure(text="")
 
+    # -- Alerts ---------------------------------------------------
+    def _update_alert_controls(self):
+        """"enable alerts" is only usable while a schedule is active and at
+        least one alert channel is completely configured; the setup
+        button always is."""
+        usable = self.sync_schedule_var.get() and alerts_configured(self.alert_cfg)
+        self.alerts_chk.configure(state="normal" if usable else "disabled")
+        self._update_alert_icon()
+
+    def _alerts_active(self) -> bool:
+        return (self.alerts_var.get() and self.sync_schedule_var.get()
+                and alerts_configured(self.alert_cfg))
+
+    def _alert_icon_state(self) -> str:
+        if not self._alerts_active():
+            return "off"
+        if self.alert_state.faulty_since:
+            return "faulty"
+        if self._alert_send_failed:
+            return "mailfail"
+        return "ok"
+
+    def _update_alert_icon(self):
+        self.alert_icon.set_state(self._alert_icon_state())
+
+    def _alert_icon_text(self) -> str:
+        """Tooltip of the alert icon."""
+        st = self.alert_state
+        if not self._alerts_active():
+            why = []
+            if not self.sync_schedule_var.get():
+                why.append("\"sync every ... h\" is not ticked")
+            if not alerts_configured(self.alert_cfg):
+                why.append("no alert channel is completely set up")
+            if not self.alerts_var.get():
+                why.append("\"enable alerts\" is not ticked")
+            lines = ["Alerts are off: " + "; ".join(why) + "."]
+        elif st.faulty_since:
+            lines = [f"Scheduled sync FAULTY since {_fmt_iso(st.faulty_since)}."]
+            if st.alert_sent and self.alert_cfg.alert_once:
+                lines.append("An alert was sent; no further alerts until it works again.")
+            elif not st.alert_sent:
+                lines.append("No alert could be sent yet.")
+        else:
+            lines = ["Alerts are on; the last scheduled sync was fine "
+                     "(or none has run yet)."]
+        if self._alerts_active() and self._alert_send_failed:
+            lines.append(f"Last message NOT sent: {self._alert_send_failed}")
+        if self.alert_cfg.canary and st.last_canary:
+            lines.append(f"Last canary/recovery message: {st.last_canary}")
+        return "\n".join(lines)
+
+    def _save_alert_config(self):
+        try:
+            save_alert_config(get_alerts_path(), self.alert_cfg, self.alert_state)
+        except Exception as exc:
+            self.alert_status_label.configure(
+                text=f"could not save alert settings: {exc}", fg="#c0392b")
+
+    def _reset_alert_state(self):
+        """Forget a faulty spell (switching alerts off or on starts afresh);
+        the date of the last canary is kept."""
+        self.alert_state = AlertState(last_canary=self.alert_state.last_canary)
+        self._alert_send_failed = ""
+
+    def _on_alerts_toggle(self):
+        self.alert_cfg.enabled = self.alerts_var.get()
+        self._reset_alert_state()
+        self.alert_status_label.configure(text="")
+        self._save_alert_config()
+        self._update_alert_icon()
+
+    def _open_alert_setup(self):
+        AlertSetupDialog(self.root, replace(self.alert_cfg),
+                         on_save=self._alert_setup_saved)
+
+    def _alert_setup_saved(self, cfg: AlertConfig):
+        cfg.enabled = self.alerts_var.get()
+        self.alert_cfg = cfg
+        self._save_alert_config()
+        self._update_alert_controls()
+
+    def _nothing_to_transfer_reason(self) -> str:
+        if self.source_root is None or not self.src_data:
+            return "source not reachable or no Metek/Proc/Raw data found"
+        if self.dest_root is None or not self.dest_data:
+            return ("destination not reachable or it contains no "
+                    "Metek/Proc/Raw folder")
+        if not self.source_panel.get_selection():
+            return "nothing is selected in the source tree"
+        return "no new files to transfer"
+
+    def _check_alerts(self, files: int, nbytes: int, note: str = "",
+                      errors: Optional[List[str]] = None):
+        """Called after every scheduled sync (also when there was nothing
+        to copy): updates the remembered alert state and sends an alert,
+        recovery or canary message if one is due (see next_message). The
+        message is sent in a background thread so a slow mail server
+        never blocks the GUI."""
+        if not self._alerts_active():
+            return
+        faulty = sync_is_faulty(self.alert_cfg, files, nbytes)
+        faulty_since = self.alert_state.faulty_since
+        kind, self.alert_state = next_message(self.alert_cfg, self.alert_state, faulty)
+        faulty_since = self.alert_state.faulty_since or faulty_since
+        self._save_alert_config()
+        self._update_alert_icon()
+        ts = time.strftime("%d.%m. %H:%M")
+        if kind is None:
+            self.alert_status_label.configure(
+                text=(f"sync faulty, alert already sent ({ts})" if faulty
+                      else f"sync OK ({ts})"),
+                fg="#c0392b" if faulty else "#555555")
+            return
+        cfg = replace(self.alert_cfg)
+        msg = build_alert_message(
+            cfg, kind, files, nbytes,
+            source=str(self.source_root or ""), dest=str(self.dest_root or ""),
+            note=note, errors=errors, faulty_since=faulty_since)
+        what = {"alert": "alert", "recovered": "recovery message"}.get(
+            kind, "canary message")
+        self.alert_status_label.configure(text=f"sending {what} ...", fg="#555555")
+
+        def done(ok, value):
+            ts = time.strftime("%d.%m. %H:%M")
+            if ok:
+                self.alert_state = mark_sent(self.alert_state, kind)
+                self._alert_send_failed = ""
+                self._save_alert_config()
+                self.alert_status_label.configure(
+                    text=f"{what} sent {ts}",
+                    fg="#c0392b" if kind == "alert" else "#555555")
+            else:
+                self._alert_send_failed = describe_error(value)
+                self.alert_status_label.configure(
+                    text=f"{what} NOT sent {ts}: {self._alert_send_failed}",
+                    fg="#c0392b")
+            self._update_alert_icon()
+
+        _run_in_background(self.root, lambda: send_email(cfg, msg), done)
 
 def main():
     root = tk.Tk()
