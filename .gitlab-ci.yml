@@ -287,15 +287,20 @@ merge_github:
   rules:
     # Release
     - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+  variables:
+    # Fresh clone for every run:
+    GIT_STRATEGY: clone
   before_script:
     - apk add --update git
   script:
     - git config --global user.email "$GITLAB_USER_EMAIL"
     - git config --global user.name "$GITLAB_USER_NAME"
     - git remote set-url origin "https://ci_access_token:$CI_ACCESS_TOKEN@$CI_SERVER_HOST/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME.git"
-    - git fetch origin github main --tags
-    # Checkout github branch
-    - git checkout github 2>/dev/null || git checkout -b github origin/github
+    # Aa bare "git fetch origin github main" only updates FETCH_HEAD
+    # (unless the clone happens to have a matching remote.origin.fetch setting)
+    - git fetch origin "+refs/heads/github:refs/remotes/origin/github" "+refs/heads/main:refs/remotes/origin/main" --tags
+    # Start from the remote github branch, never from a local leftover
+    - git checkout -B github origin/github
     # Squash merge main into github
     - git merge --squash origin/main -X theirs --allow-unrelated-histories 2>&1 | tee git.out || true
     # Exit gracefully if nothing new
